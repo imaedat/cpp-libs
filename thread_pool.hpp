@@ -102,6 +102,6 @@ class thread_pool
     }
 };
 
-}  // namespace tdb
+}  // namespace tbd
 
 #endif
