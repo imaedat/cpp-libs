@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 
 namespace tbd {
 
@@ -20,7 +21,7 @@ class isemaphore
     explicit isemaphore(size_t count)
     {
         if (count > SEM_VALUE_MAX) {
-            throw std::length_error("isemaphore: invalid count");
+            throw std::length_error("isemaphore: count too large");
         }
 
         nmaps_ = count >> 6;       // count / 64 => 0 ~ 63
@@ -85,7 +86,7 @@ class isemaphore
     void release(int64_t pos)
     {
         if (pos >= (int64_t)SEM_VALUE_MAX || pos < 0) {
-            return;  // throw
+            throw std::invalid_argument("isemaphore::release: invalid position");
         }
 
         std::lock_guard<std::mutex> lk(mtx_);
