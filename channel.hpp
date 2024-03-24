@@ -72,6 +72,11 @@ class receiver
         return msg;
     }
 
+    int native_handle() const
+    {
+        return fd_;
+    }
+
   private:
     int fd_ = -1;
     explicit receiver(int fd) : fd_(fd) {}
