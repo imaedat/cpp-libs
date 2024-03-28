@@ -6,7 +6,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <memory>
+#include <atomic>
+#include <optional>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -28,11 +29,11 @@ std::pair<sender<T>, receiver<T>> new_channel()
     return {sender<T>(sv[0]), receiver<T>(sv[1])};
 }
 
-// non-copyable, but movable
 template <typename T>
 class receiver
 {
   public:
+    // not copyable
     receiver(const receiver&)
 #ifdef CHANNEL_ENABLE_COPY_CONSTRUCTIBLE
     {
@@ -42,6 +43,8 @@ class receiver
         = delete;
 #endif
     receiver& operator=(const receiver&) = delete;
+
+    // movable
     receiver(receiver&& rhs)
     {
         *this = std::move(rhs);
@@ -54,6 +57,7 @@ class receiver
         }
         return *this;
     }
+
     ~receiver()
     {
         if (fd_ >= 0) {
@@ -62,14 +66,19 @@ class receiver
         }
     }
 
-    T recv() const
+    std::optional<T> recv() const
     {
         T msg;
-        if (::read(fd_, &msg, sizeof(T)) < 0) {
-            throw std::system_error(errno, std::generic_category());
+        auto nread = ::read(fd_, &msg, sizeof(T));
+        if (nread == sizeof(T)) {
+          return msg;
         }
 
-        return msg;
+        if (nread == 0) {
+          return std::nullopt;
+        }
+
+        throw std::system_error(errno, std::generic_category());
     }
 
     int native_handle() const
@@ -84,52 +93,63 @@ class receiver
     friend std::pair<sender<T>, receiver<T>> new_channel<T>();
 };
 
-// copyable
 template <typename T>
 class sender
 {
   public:
+    // copyable
     sender(const sender& rhs)
     {
         *this = rhs;
     }
     sender& operator=(const sender& rhs)
     {
-        if (this != &rhs) {
+        if (this != &rhs && rhs.refcnt_) {
+            rhs.refcnt_->fetch_add(1);
+            refcnt_ = rhs.refcnt_;
             fd_ = rhs.fd_;
         }
         return *this;
     }
+
+    // movable
     sender(sender&& rhs)
     {
         *this = std::move(rhs);
     }
     sender& operator=(sender&& rhs)
     {
+        using std::swap;
         if (this != &rhs) {
-            fd_.swap(rhs.fd_);
+            swap(refcnt_, rhs.refcnt_);
+            swap(fd_, rhs.fd_);
         }
         return *this;
     }
+
     ~sender()
     {
-        // FIXME not thread-safe
-        if (!!fd_ && *fd_ >= 0 && fd_.use_count() == 1) {
-            ::close(*fd_);
-            fd_.reset();
+        if (refcnt_ && refcnt_->fetch_sub(1) == 1) {
+            ::close(fd_);
+            delete refcnt_;
+            refcnt_ = nullptr;
         }
+        fd_ = -1;
     }
 
     void send(const T& msg) const
     {
-        if (::write(*fd_, &msg, sizeof(T)) < 0) {
+        if (::write(fd_, &msg, sizeof(T)) < 0) {
             throw std::system_error(errno, std::generic_category());
         }
     }
 
   private:
-    std::shared_ptr<int> fd_;
-    explicit sender(int fd) : fd_(new int(fd)) {}
+    std::atomic<uint64_t> *refcnt_ = nullptr;
+    int fd_ = -1;
+
+    explicit sender(int fd)
+        : refcnt_(new std::atomic<uint64_t>(1)), fd_(fd) {}
 
     friend std::pair<sender<T>, receiver<T>> new_channel<T>();
 };
