@@ -36,11 +36,12 @@ class thread_pool
 
     void submit(std::function<void(void)>&& fn)
     {
+        std::lock_guard<std::mutex> lk(mtx_);
+
         if (!running_) {
             throw std::runtime_error("thread_pool not running");
         }
 
-        std::lock_guard<std::mutex> lk(mtx_);
         taskq_.emplace_back(std::forward<std::function<void(void)>>(fn));
         cv_.notify_one();
     }
