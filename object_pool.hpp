@@ -161,7 +161,7 @@ class object_pool : public std::enable_shared_from_this<object_pool<T>>
     std::condition_variable cv_;
     std::vector<T*> objs_;
 
-    explicit object_pool(builder_t&& b, deleter_t&& d)
+    object_pool(builder_t&& b, deleter_t&& d)
     {
         opts_.new_object = std::forward<builder_t>(b);
         if (!opts_.new_object) {

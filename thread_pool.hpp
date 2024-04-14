@@ -14,7 +14,7 @@ namespace tbd {
 class thread_pool
 {
   public:
-    thread_pool(size_t n = (std::thread::hardware_concurrency() != 0
+    explicit thread_pool(size_t n = (std::thread::hardware_concurrency() != 0
                                 ? std::thread::hardware_concurrency()
                                 : 8))
         : running_(true)

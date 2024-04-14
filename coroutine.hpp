@@ -47,7 +47,7 @@ class coroutine
         ucontext_t *parent_;
         ucontext_t ctx_;
 
-        explicit routine(Func&& fn, size_t ss, ucontext_t *parent)
+        routine(Func&& fn, size_t ss, ucontext_t *parent)
             : fn_(std::forward<Func>(fn))
             , stack_size_(ss)
             , stack_(nullptr)
@@ -81,7 +81,7 @@ class coroutine
     };  // class routine
 
   public:
-    coroutine(size_t ss = COROUTINE_STACK_SIZE)
+    explicit coroutine(size_t ss = COROUTINE_STACK_SIZE)
         : stack_size_(ss)
         , current_(nullptr)
     {
