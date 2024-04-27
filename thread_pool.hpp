@@ -85,7 +85,7 @@ class thread_pool
             std::unique_lock<std::mutex> lk(mtx_);
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
             if (taskq_.empty()) {
-                cv_caller_.notify_one();
+                cv_caller_.notify_all();
             }
 #endif
             cv_.wait(lk, [this] { return !running_ || !taskq_.empty(); });
