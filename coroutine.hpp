@@ -12,25 +12,27 @@
 #include <system_error>
 
 #ifndef COROUTINE_STACK_SIZE
-#define COROUTINE_STACK_SIZE (4 * 1024)
+#define COROUTINE_STACK_SIZE (8 * 1024)
 #endif
 
 namespace tbd {
 
 template <typename T>
-class coroutine
+class coroutine_env
 {
-    using Func = std::function<void()>;
+    using Func = std::function<void(coroutine_env<T>&)>;
 
-    class routine
+    class coroutine
     {
-        friend class coroutine<T>;
+        friend class coroutine_env<T>;
 
       public:
-        routine(const routine&) = delete;
-        routine& operator=(const routine&) = delete;
+        coroutine(const coroutine&) = delete;
+        coroutine& operator=(const coroutine&) = delete;
+        coroutine(coroutine&&) noexcept = default;
+        coroutine& operator=(coroutine&&) noexcept = default;
 
-        ~routine()
+        ~coroutine()
         {
             if (stack_) {
                 mprotect(stack_, sysconf(_SC_PAGE_SIZE), PROT_WRITE);
@@ -39,24 +41,29 @@ class coroutine
             }
         }
 
+        T resume()
+        {
+            return env_.resume(this);
+        }
+
       private:
         Func fn_;
         size_t stack_size_;
         char *stack_;
         bool finished_;
-        ucontext_t *parent_;
-        ucontext_t ctx_;
+        coroutine_env<T> &env_;
+        ucontext_t uctx_;
 
-        routine(Func&& fn, size_t ss, ucontext_t *parent)
+        coroutine(Func&& fn, size_t ss, coroutine_env<T> &env)
             : fn_(std::forward<Func>(fn))
             , stack_size_(ss)
             , stack_(nullptr)
             , finished_(false)
-            , parent_(parent)
+            , env_(env)
         {
-            if (getcontext(&ctx_) < 0) {
+            if (getcontext(&uctx_) < 0) {
                 throw std::system_error(errno, std::generic_category(),
-                        "routine: getcontext");
+                        "coroutine: getcontext");
             }
 
             size_t pagesz = sysconf(_SC_PAGE_SIZE);
@@ -66,55 +73,83 @@ class coroutine
             }
             mprotect(stack_, pagesz, PROT_NONE);  // guard page
 
-            ctx_.uc_stack.ss_sp = stack_ + pagesz;
-            ctx_.uc_stack.ss_size = stack_size_;
-            ctx_.uc_link = parent_;
+            uctx_.uc_stack.ss_sp = stack_ + pagesz;
+            uctx_.uc_stack.ss_size = stack_size_;
+            uctx_.uc_link = &env_.uctx_;
 
-            makecontext(&ctx_, (void (*)())&execute, 1, this);
+            makecontext(&uctx_, (void (*)())&execute, 1, this);
         }
 
-        static void execute(routine *r)
+        static void execute(coroutine *co)
         {
-            r->fn_();
-            r->finished_ = true;
+            co->fn_(co->env_);
+            co->finished_ = true;
         }
-    };  // class routine
+    };  // class coroutine
+
+    friend class coroutine;
 
   public:
-    explicit coroutine(size_t ss = COROUTINE_STACK_SIZE)
-        : stack_size_(ss)
-        , current_(nullptr)
+    coroutine_env() noexcept : current_(nullptr)
     {
         //
     }
 
-    coroutine(const coroutine&) = delete;
-    coroutine& operator=(const coroutine&) = delete;
+    coroutine_env(const coroutine_env&) = delete;
+    coroutine_env& operator=(const coroutine_env&) = delete;
+    coroutine_env(coroutine_env&&) noexcept = default;
+    coroutine_env& operator=(coroutine_env&&) noexcept = default;
 
-    ~coroutine() = default;
+    ~coroutine_env() = default;
 
-    routine spawn(Func&& fn)
+    coroutine spawn(Func&& fn, size_t ss = COROUTINE_STACK_SIZE)
     {
-        return routine(std::forward<Func>(fn), stack_size_, &own_ctx_);
+        return coroutine(std::forward<Func>(fn), ss, *this);
     }
 
-    T resume(routine& r)
+    void yield(std::optional<T>&& v = {})
+    {
+        assert(current_);
+        assert(&current_->env_.uctx_ == &uctx_);
+
+        last_value_ = std::forward<std::optional<T>>(v);
+        auto *cur_ctx = &current_->uctx_;
+        current_ = nullptr;
+        if (swapcontext(cur_ctx, &uctx_) < 0) {
+            throw std::system_error(errno, std::generic_category(),
+                    "coroutine_env::yield: swapcontext");
+        }
+    }
+
+    void exit(std::optional<T>&& v = {})
+    {
+        assert(current_);
+        current_->finished_ = true;
+        yield(std::forward<std::optional<T>>(v));
+    }
+
+  private:
+    ucontext_t uctx_;
+    coroutine *current_;
+    std::optional<T> last_value_;
+
+    T resume(coroutine *co)
     {
         assert(!current_);
-        assert(r.parent_ == &own_ctx_);
 
-        if (r.finished_) {
+        if (co->finished_) {
 #ifdef COROUTINE_FINISHED_ROUTEINE_RESUMABLE
             return T{};
 #else
-            throw std::invalid_argument("coroutine::resume: routine already finished");
+            throw std::invalid_argument(
+                    "coroutine_env::resume: coroutine already finished");
 #endif
         }
 
-        current_ = &r;
-        if (swapcontext(&own_ctx_, &current_->ctx_) < 0) {
+        current_ = co;
+        if (swapcontext(&uctx_, &current_->uctx_) < 0) {
             throw std::system_error(errno, std::generic_category(),
-                    "coroutine::resume: swapcontext");
+                    "coroutine_env::resume: swapcontext");
         }
 
         if (last_value_) {
@@ -129,32 +164,6 @@ class coroutine
             return T{};  // `T` must be default constructible
         }
     }
-
-    void yield(std::optional<T>&& v = {})
-    {
-        assert(current_);
-
-        last_value_ = std::forward<std::optional<T>>(v);
-        auto *cur_ctx = &current_->ctx_;
-        current_ = nullptr;
-        if (swapcontext(cur_ctx, &own_ctx_) < 0) {
-            throw std::system_error(errno, std::generic_category(),
-                    "coroutine::yield: swapcontext");
-        }
-    }
-
-    void exit(std::optional<T>&& v = {})
-    {
-        assert(current_);
-        current_->finished_ = true;
-        yield(std::forward<std::optional<T>>(v));
-    }
-
-  private:
-    size_t stack_size_;
-    routine *current_;
-    ucontext_t own_ctx_;
-    std::optional<T> last_value_;
 };
 
 }  // namespace tbd

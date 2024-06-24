@@ -45,11 +45,11 @@ class receiver
     receiver& operator=(const receiver&) = delete;
 
     // movable
-    receiver(receiver&& rhs)
+    receiver(receiver&& rhs) noexcept
     {
         *this = std::move(rhs);
     }
-    receiver& operator=(receiver&& rhs)
+    receiver& operator=(receiver&& rhs) noexcept
     {
         if (this != &rhs) {
             fd_ = rhs.fd_;
@@ -88,7 +88,7 @@ class receiver
 
   private:
     int fd_ = -1;
-    explicit receiver(int fd) : fd_(fd) {}
+    explicit receiver(int fd) noexcept : fd_(fd) {}
 
     friend std::pair<sender<T>, receiver<T>> new_channel<T>();
 };
@@ -98,11 +98,11 @@ class sender
 {
   public:
     // copyable
-    sender(const sender& rhs)
+    sender(const sender& rhs) noexcept
     {
         *this = rhs;
     }
-    sender& operator=(const sender& rhs)
+    sender& operator=(const sender& rhs) noexcept
     {
         if (this != &rhs && rhs.refcnt_) {
             rhs.refcnt_->fetch_add(1);
@@ -113,11 +113,11 @@ class sender
     }
 
     // movable
-    sender(sender&& rhs)
+    sender(sender&& rhs) noexcept
     {
         *this = std::move(rhs);
     }
-    sender& operator=(sender&& rhs)
+    sender& operator=(sender&& rhs) noexcept
     {
         using std::swap;
         if (this != &rhs) {

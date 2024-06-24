@@ -55,7 +55,7 @@ class message_queue
         eventfd_ = -1;
     }
 
-    int poll_handle() const
+    int poll_handle() const noexcept
     {
         return eventfd_;
     }

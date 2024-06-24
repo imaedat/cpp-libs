@@ -10,7 +10,7 @@ namespace tbd {
 class parker
 {
   public:
-    parker() : sem_(std::make_unique<sem_t>())
+    parker() noexcept : sem_(std::make_unique<sem_t>())
     {
         sem_init(sem_.get(), 0, 0);
     }
@@ -23,11 +23,11 @@ class parker
     parker(const parker&) = delete;
     parker& operator=(const parker&) = delete;
 
-    parker(parker&& rhs)
+    parker(parker&& rhs) noexcept
     {
         *this = std::move(rhs);
     }
-    parker& operator=(parker&& rhs)
+    parker& operator=(parker&& rhs) noexcept
     {
         if (this != &rhs) {
             sem_.swap(rhs.sem_);

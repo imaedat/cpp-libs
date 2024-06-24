@@ -26,11 +26,11 @@ class pooled_object
     pooled_object(const pooled_object&) = delete;
     pooled_object& operator=(const pooled_object&) = delete;
 
-    pooled_object(pooled_object&& rhs)
+    pooled_object(pooled_object&& rhs) noexcept
     {
         *this = std::move(rhs);
     }
-    pooled_object& operator=(pooled_object&& rhs)
+    pooled_object& operator=(pooled_object&& rhs) noexcept
     {
         if (this != &rhs) {
             swap(obj_, rhs.obj_);
@@ -77,7 +77,7 @@ class pooled_object
 
     pooled_object() = default;
 
-    pooled_object(T* o, const std::shared_ptr<pool>& p, const deleter_t& d = {})
+    pooled_object(T* o, const std::shared_ptr<pool>& p, const deleter_t& d = {}) noexcept
         : obj_(o), pool_(p), delete_object_(d)
     {
         //

@@ -27,6 +27,8 @@ class sqlite
 
     sqlite(const sqlite&) = delete;
     sqlite& operator=(const sqlite&) = delete;
+    sqlite(sqlite&&) noexcept = default;
+    sqlite& operator=(sqlite&&) noexcept = default;
 
     ~sqlite()
     {
@@ -113,6 +115,8 @@ class sqlite
       public:
         transaction(const transaction&) = delete;
         transaction& operator=(const transaction&) = delete;
+        transaction(transaction&&) noexcept = default;
+        transaction& operator=(transaction&&) noexcept = default;
         ~transaction()
         {
             rollback();
@@ -157,7 +161,7 @@ class sqlite
         sqlite& db_;
         bool completed_;
 
-        explicit transaction(sqlite& db) : db_(db), completed_(false) {}
+        explicit transaction(sqlite& db) noexcept : db_(db), completed_(false) {}
 
         friend class sqlite;
     };
