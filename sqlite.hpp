@@ -16,7 +16,7 @@ class sqlite
     using query_cb_t = std::function<void(int,char**)>;
 
   public:
-    explicit sqlite(std::string_view dbfile)
+    explicit sqlite(std::string_view dbfile = ":memory:")
     {
         int rc = sqlite3_open(dbfile.data(), &db_);
         if (rc != SQLITE_OK) {

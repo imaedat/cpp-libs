@@ -18,6 +18,9 @@ class thread_pool
                                 ? std::thread::hardware_concurrency()
                                 : 8))
         : running_(true)
+#ifdef THREAD_POOL_ENABLE_WAIT_ALL
+        , noutstandings_(0)
+#endif
     {
         for (size_t i = 0; i < n; ++i) {
             workers_.emplace_back([this] { executor(); });
@@ -43,6 +46,9 @@ class thread_pool
         }
 
         taskq_.emplace_back(std::forward<std::function<void(void)>>(fn));
+#ifdef THREAD_POOL_ENABLE_WAIT_ALL
+        ++noutstandings_;
+#endif
         cv_.notify_one();
     }
 
@@ -53,19 +59,24 @@ class thread_pool
         cv_.notify_all();
     }
 
-    void force_stop(void)
+    size_t force_stop(void)
     {
         std::lock_guard<std::mutex> lk(mtx_);
+        auto canceled = taskq_.size();
+#ifdef THREAD_POOL_ENABLE_WAIT_ALL
+        noutstandings_ -= canceled;
+#endif
         taskq_.clear();
         running_ = false;
         cv_.notify_all();
+        return canceled;
     }
 
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
     void wait_all(void)
     {
         std::unique_lock<std::mutex> lk(mtx_);
-        cv_caller_.wait(lk, [this] { return taskq_.empty(); });
+        cv_caller_.wait(lk, [this] { return noutstandings_ == 0 && taskq_.empty(); });
     }
 #endif
 
@@ -76,19 +87,16 @@ class thread_pool
     std::mutex mtx_;
     std::condition_variable cv_;
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
+    size_t noutstandings_;
     std::condition_variable cv_caller_;
 #endif
 
     void executor(void)
     {
+        std::unique_lock<std::mutex> ul(mtx_);
+
         while (true) {
-            std::unique_lock<std::mutex> lk(mtx_);
-#ifdef THREAD_POOL_ENABLE_WAIT_ALL
-            if (taskq_.empty()) {
-                cv_caller_.notify_all();
-            }
-#endif
-            cv_.wait(lk, [this] { return !running_ || !taskq_.empty(); });
+            cv_.wait(ul, [this] { return !running_ || !taskq_.empty(); });
             if (!running_ && taskq_.empty()) {
                 break;
             }
@@ -96,9 +104,16 @@ class thread_pool
             assert(!taskq_.empty());
             auto task = std::move(taskq_.front());
             taskq_.pop_front();
-            lk.unlock();
+            ul.unlock();
 
             task();
+
+            ul.lock();
+#ifdef THREAD_POOL_ENABLE_WAIT_ALL
+            if (--noutstandings_ == 0 && taskq_.empty()) {
+                cv_caller_.notify_all();
+            }
+#endif
         }
     }
 };

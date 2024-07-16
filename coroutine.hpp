@@ -17,7 +17,7 @@
 
 namespace tbd {
 
-template <typename T>
+template <typename T = int>
 class coroutine_env
 {
     using Func = std::function<void(coroutine_env<T>&)>;
@@ -41,7 +41,7 @@ class coroutine_env
             }
         }
 
-        T resume()
+        std::optional<T> resume()
         {
             return env_.resume(this);
         }
@@ -82,8 +82,19 @@ class coroutine_env
 
         static void execute(coroutine *co)
         {
-            co->fn_(co->env_);
+            std::exception_ptr ep;
+
+            try {
+                co->fn_(co->env_);
+            } catch (...) {
+                ep = std::current_exception();
+            }
+
             co->finished_ = true;
+
+            if (ep) {
+                std::rethrow_exception(ep);
+            }
         }
     };  // class coroutine
 
@@ -133,16 +144,16 @@ class coroutine_env
     coroutine *current_;
     std::optional<T> last_value_;
 
-    T resume(coroutine *co)
+    std::optional<T> resume(coroutine *co)
     {
         assert(!current_);
 
         if (co->finished_) {
-#ifdef COROUTINE_FINISHED_ROUTEINE_RESUMABLE
-            return T{};
-#else
+#ifdef COROUTINE_EXCEPTION_AGAINST_FINISHED
             throw std::invalid_argument(
                     "coroutine_env::resume: coroutine already finished");
+#else
+            return std::nullopt;
 #endif
         }
 
@@ -157,11 +168,10 @@ class coroutine_env
             auto val = std::move(*last_value_);
             last_value_ = std::nullopt;
             return val;
-
         } else {
             // on return, or on yield w/o value
             current_ = nullptr;
-            return T{};  // `T` must be default constructible
+            return std::nullopt;
         }
     }
 };
