@@ -98,7 +98,7 @@ class thread_pool
         while (true) {
             cv_.wait(ul, [this] { return !running_ || !taskq_.empty(); });
             if (!running_ && taskq_.empty()) {
-                break;
+                return;
             }
 
             assert(!taskq_.empty());
