@@ -20,7 +20,21 @@ namespace tbd {
 template <typename T = int>
 class coroutine_env
 {
-    using Func = std::function<void(coroutine_env<T>&)>;
+    using value_type = std::optional<T>;
+
+    class yielder
+    {
+        coroutine_env<T> &env_;
+
+      public:
+        explicit yielder(coroutine_env<T> &env) noexcept : env_(env) {}
+        void operator()(value_type&& v = std::nullopt) const
+        {
+            env_.yield(std::forward<value_type>(v));
+        }
+    };
+
+    using coro_fn = std::function<void(yielder&)>;
 
     class coroutine
     {
@@ -41,21 +55,21 @@ class coroutine_env
             }
         }
 
-        std::optional<T> resume()
+        value_type resume()
         {
             return env_.resume(this);
         }
 
       private:
-        Func fn_;
+        coro_fn fn_;
         size_t stack_size_;
         char *stack_;
         bool finished_;
         coroutine_env<T> &env_;
         ucontext_t uctx_;
 
-        coroutine(Func&& fn, size_t ss, coroutine_env<T> &env)
-            : fn_(std::forward<Func>(fn))
+        coroutine(coro_fn&& fn, size_t ss, coroutine_env<T> &env)
+            : fn_(std::forward<coro_fn>(fn))
             , stack_size_(ss)
             , stack_(nullptr)
             , finished_(false)
@@ -85,7 +99,7 @@ class coroutine_env
             std::exception_ptr ep;
 
             try {
-                co->fn_(co->env_);
+                co->fn_(co->env_.yield_);
             } catch (...) {
                 ep = std::current_exception();
             }
@@ -98,10 +112,11 @@ class coroutine_env
         }
     };  // class coroutine
 
+    friend class yielder;
     friend class coroutine;
 
   public:
-    coroutine_env() noexcept : current_(nullptr)
+    coroutine_env() noexcept : current_(nullptr), yield_(*this)
     {
         //
     }
@@ -113,38 +128,27 @@ class coroutine_env
 
     ~coroutine_env() = default;
 
-    coroutine spawn(Func&& fn, size_t ss = COROUTINE_STACK_SIZE)
+    coroutine spawn(coro_fn&& fn, size_t ss = COROUTINE_STACK_SIZE)
     {
-        return coroutine(std::forward<Func>(fn), ss, *this);
+        return coroutine(std::forward<coro_fn>(fn), ss, *this);
     }
 
-    void yield(std::optional<T>&& v = {})
-    {
-        assert(current_);
-        assert(&current_->env_.uctx_ == &uctx_);
-
-        last_value_ = std::forward<std::optional<T>>(v);
-        auto *cur_ctx = &current_->uctx_;
-        current_ = nullptr;
-        if (swapcontext(cur_ctx, &uctx_) < 0) {
-            throw std::system_error(errno, std::generic_category(),
-                    "coroutine_env::yield: swapcontext");
-        }
-    }
-
-    void exit(std::optional<T>&& v = {})
+#if 0
+    void exit(value_type&& v = {})
     {
         assert(current_);
         current_->finished_ = true;
-        yield(std::forward<std::optional<T>>(v));
+        yield(std::forward<value_type>(v));
     }
+#endif
 
   private:
     ucontext_t uctx_;
     coroutine *current_;
-    std::optional<T> last_value_;
+    value_type last_value_;
+    yielder yield_;
 
-    std::optional<T> resume(coroutine *co)
+    value_type resume(coroutine *co)
     {
         assert(!current_);
 
@@ -172,6 +176,20 @@ class coroutine_env
             // on return, or on yield w/o value
             current_ = nullptr;
             return std::nullopt;
+        }
+    }
+
+    void yield(value_type&& v = std::nullopt)
+    {
+        assert(current_);
+        assert(&current_->env_.uctx_ == &uctx_);
+
+        last_value_ = std::forward<value_type>(v);
+        auto *cur_ctx = &current_->uctx_;
+        current_ = nullptr;
+        if (swapcontext(cur_ctx, &uctx_) < 0) {
+            throw std::system_error(errno, std::generic_category(),
+                    "coroutine_env::yield: swapcontext");
         }
     }
 };

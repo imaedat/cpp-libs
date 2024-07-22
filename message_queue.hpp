@@ -2,46 +2,22 @@
 #define MESSAGE_QUEUE_HPP_
 
 #include <errno.h>
-#include <sys/epoll.h>
+#include <poll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
 #include <chrono>
-#include <functional>
 #include <mutex>
 #include <optional>
 #include <queue>
 
 namespace tbd {
 
-namespace detail {
-class defer_block
-{
-  public:
-    explicit defer_block(std::function<void()>&& fn)
-        : fn_(std::forward<std::function<void()>>(fn))
-    {}
-
-    ~defer_block()
-    {
-        try {
-            fn_();
-        } catch (...) {
-            // ignore
-        }
-    }
-
-  private:
-    std::function<void()> fn_;
-};
-}  // namespace detail
-
 template <typename T>
 class message_queue
 {
   public:
-    message_queue()
-        : eventfd_(eventfd(0, EFD_SEMAPHORE))
+    message_queue() : eventfd_(eventfd(0, EFD_SEMAPHORE))
     {
         if (eventfd_ < 0) {
             throw std::system_error(errno, std::generic_category(),
@@ -51,7 +27,7 @@ class message_queue
 
     ~message_queue()
     {
-        close_(eventfd_);
+        close(eventfd_);
         eventfd_ = -1;
     }
 
@@ -64,61 +40,54 @@ class message_queue
     {
         std::lock_guard<std::mutex> lk(queue_mtx_);
         mq_.push(msg);
-        ::write(eventfd_, &one, sizeof(one));
+        write(eventfd_, &one, sizeof(one));
     }
 
     void push(T&& msg)
     {
         std::lock_guard<std::mutex> lk(queue_mtx_);
         mq_.push(std::forward<T>(msg));
-        ::write(eventfd_, &one, sizeof(one));
+        write(eventfd_, &one, sizeof(one));
     }
 
     T pop()
     {
-        uint64_t u;
-        ::read(eventfd_, &u, sizeof(u));
+#ifdef MESSAGE_QUEUE_TIMEDPOP_MULTIPLE_READERS
+        std::lock_guard<std::timed_mutex> lk(reader_mtx_);
+#endif
 
-        std::lock_guard<std::mutex> lk(queue_mtx_);
-        T msg = std::move(mq_.front());
-        mq_.pop();
-        return msg;
+        return pop_internal();
     }
 
     std::optional<T> timed_pop(int wait_ms)
     {
-        int epollfd = -1;
-        detail::defer_block d([epollfd] { close_(epollfd); });
-
-        epollfd = epoll_create1(0);
-        if (epollfd < 0) {
-            throw std::system_error(errno, std::generic_category(),
-                    "message_queue::timed_pop: epoll_create1");
-        }
-
-        struct epoll_event ev;
-        ev.events = EPOLLIN;
-        int ret = epoll_ctl(epollfd, EPOLL_CTL_ADD, eventfd_, &ev);
-        if (ret < 0) {
-            throw std::system_error(errno, std::generic_category(),
-                    "message_queue::timed_pop: epoll_ctl");
-        }
+        using namespace std::chrono;
 
 #ifdef MESSAGE_QUEUE_TIMEDPOP_MULTIPLE_READERS
+        auto t1 = steady_clock::now();
         std::unique_lock<std::timed_mutex> lk(reader_mtx_, std::defer_lock);
         if (!lk.try_lock_for(std::chrono::milliseconds(wait_ms))) {
             return std::nullopt;
         }
+        auto t2 = steady_clock::now();
+        auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
+        if (elapsed > 0) {
+            wait_ms -= elapsed;
+        }
 #endif
 
-        int nfds = epoll_wait(epollfd, &ev, 1, wait_ms);
+        struct pollfd fds;
+        fds.fd = eventfd_;
+        fds.events = POLLIN | POLLPRI | POLLRDHUP;
+        fds.revents = 0;
+        int nfds = poll(&fds, 1, wait_ms);
         if (nfds < 0) {
             throw std::system_error(errno, std::generic_category(),
-                    "message_queue::timed_pop: epoll_wait");
+                    "message_queue::timed_pop: poll");
         }
 
         if (nfds > 0) {
-            return pop();
+            return pop_internal();
         } else {
             return std::nullopt;
         }
@@ -126,12 +95,6 @@ class message_queue
 
   private:
     inline static constexpr uint64_t one = 1;
-    static void close_(int fd)
-    {
-        if (fd >= 0) {
-            ::close(fd);
-        }
-    }
 
     int eventfd_ = -1;
     std::queue<T> mq_;
@@ -139,6 +102,17 @@ class message_queue
 #ifdef MESSAGE_QUEUE_TIMEDPOP_MULTIPLE_READERS
     std::timed_mutex reader_mtx_;
 #endif
+
+    T pop_internal()
+    {
+        uint64_t u;
+        read(eventfd_, &u, sizeof(u));
+
+        std::lock_guard<std::mutex> lk(queue_mtx_);
+        T msg = std::move(mq_.front());
+        mq_.pop();
+        return msg;
+    }
 };
 
 }  // namespace tbd
