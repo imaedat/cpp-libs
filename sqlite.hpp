@@ -27,8 +27,18 @@ class sqlite
 
     sqlite(const sqlite&) = delete;
     sqlite& operator=(const sqlite&) = delete;
-    sqlite(sqlite&&) noexcept = default;
-    sqlite& operator=(sqlite&&) noexcept = default;
+    sqlite(sqlite&& rhs) noexcept
+    {
+        *this = std::move(rhs);
+    }
+    sqlite& operator=(sqlite&& rhs) noexcept
+    {
+        using std::swap;
+        if (this != &rhs) {
+            swap(db_, rhs.db_);
+        }
+        return *this;
+    }
 
     ~sqlite()
     {
@@ -86,8 +96,10 @@ class sqlite
 
     void close()
     {
-        sqlite3_close(db_);
-        db_ = nullptr;
+        if (db_) {
+            sqlite3_close(db_);
+            db_ = nullptr;
+        }
     }
 
     static int count_cb(void *count, int ncolumns, char **values, char **names)

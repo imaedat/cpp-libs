@@ -51,9 +51,9 @@ class receiver
     }
     receiver& operator=(receiver&& rhs) noexcept
     {
+        using std::swap;
         if (this != &rhs) {
-            fd_ = rhs.fd_;
-            rhs.fd_ = -1;
+            swap(fd_, rhs.fd_);
         }
         return *this;
     }

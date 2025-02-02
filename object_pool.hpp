@@ -11,7 +11,6 @@
 
 namespace tbd {
 
-using std::swap;
 
 template <typename T> class object_pool;
 
@@ -32,6 +31,7 @@ class pooled_object
     }
     pooled_object& operator=(pooled_object&& rhs) noexcept
     {
+        using std::swap;
         if (this != &rhs) {
             swap(obj_, rhs.obj_);
             pool_.swap(rhs.pool_);
