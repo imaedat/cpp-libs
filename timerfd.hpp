@@ -2,6 +2,7 @@
 #define TIMERFD_HPP_
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
 
@@ -27,7 +28,6 @@ class timerfd
 
     timerfd(const timerfd&) = delete;
     timerfd& operator=(const timerfd&) = delete;
-
     timerfd(timerfd&& rhs) noexcept
     {
         *this = std::move(rhs);
@@ -66,6 +66,8 @@ class timerfd
     {
         static constexpr long ns_scale = 1000 * 1000 * 1000;
 
+        clear();
+
         auto nsec = after_ms * 1000 * 1000;
         long sec = 0;
         if (nsec >= ns_scale) {
@@ -81,6 +83,8 @@ class timerfd
 
     void cancel()
     {
+        clear();
+
         struct itimerspec t{{0, 0}, {0, 0}};
         if (::timerfd_settime(fd_, 0, &t, nullptr) < 0) {
             throw std::system_error(errno, std::generic_category(),
@@ -90,8 +94,15 @@ class timerfd
 
     void clear() noexcept
     {
-        uint64_t count;
-        (void)::read(fd_, &count, sizeof(count));
+        struct pollfd fds;
+        fds.fd = fd_;
+        fds.events = POLLIN | POLLPRI | POLLRDHUP;
+        fds.revents = 0;
+        int nfds = ::poll(&fds, 1, 0);
+        if (nfds >= 1) {
+            uint64_t count;
+            (void)::read(fd_, &count, sizeof(count));
+        }
     }
 
   private:
