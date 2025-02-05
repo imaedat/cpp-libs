@@ -7,6 +7,7 @@
 #include <functional>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace tbd {
@@ -15,8 +16,8 @@ class thread_pool
 {
   public:
     explicit thread_pool(size_t n = (std::thread::hardware_concurrency() != 0
-                                ? std::thread::hardware_concurrency()
-                                : 8))
+                                         ? std::thread::hardware_concurrency()
+                                         : 8))
         : running_(true)
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
         , noutstandings_(0)
@@ -37,15 +38,16 @@ class thread_pool
         }
     }
 
-    void submit(std::function<void(void)>&& fn)
+    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    void submit(F&& fn)
     {
-        std::lock_guard<std::mutex> lk(mtx_);
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
 
         if (!running_) {
             throw std::runtime_error("thread_pool not running");
         }
 
-        taskq_.emplace_back(std::forward<std::function<void(void)>>(fn));
+        taskq_.emplace_back(std::forward<F>(fn));
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
         ++noutstandings_;
 #endif
@@ -54,14 +56,14 @@ class thread_pool
 
     void stop(void)
     {
-        std::lock_guard<std::mutex> lk(mtx_);
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
         running_ = false;
         cv_.notify_all();
     }
 
     size_t force_stop(void)
     {
-        std::lock_guard<std::mutex> lk(mtx_);
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
         auto canceled = taskq_.size();
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
         noutstandings_ -= canceled;
@@ -75,7 +77,7 @@ class thread_pool
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
     void wait_all(void)
     {
-        std::unique_lock<std::mutex> lk(mtx_);
+        std::unique_lock<decltype(mtx_)> lk(mtx_);
         cv_caller_.wait(lk, [this] { return noutstandings_ == 0 && taskq_.empty(); });
     }
 #endif
@@ -93,7 +95,7 @@ class thread_pool
 
     void executor(void)
     {
-        std::unique_lock<std::mutex> ul(mtx_);
+        std::unique_lock<decltype(mtx_)> ul(mtx_);
 
         while (true) {
             cv_.wait(ul, [this] { return !running_ || !taskq_.empty(); });

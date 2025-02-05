@@ -10,14 +10,17 @@ namespace tbd {
 class parker
 {
   public:
-    parker() noexcept : sem_(std::make_unique<sem_t>())
+    parker() noexcept
+        : sem_(std::make_unique<sem_t>())
     {
         sem_init(sem_.get(), 0, 0);
     }
 
     ~parker()
     {
-        sem_destroy(sem_.get());
+        if (sem_) {
+            sem_destroy(sem_.get());
+        }
     }
 
     parker(const parker&) = delete;

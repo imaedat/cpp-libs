@@ -7,12 +7,77 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <type_traits>
+#include <unordered_set>
 #include <vector>
 
 namespace tbd {
 
+template <typename T>
+class object_pool
+{
+  public:
+    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    object_pool(size_t max, F&& builder) noexcept
+        : max_objs_(max)
+        , nr_objs_(0)
+        , builder_(builder)
+    {}
 
-template <typename T> class object_pool;
+    explicit object_pool(size_t max)
+        : object_pool(max, []() -> T* { return new T(); })
+    {}
+
+    ~object_pool() = default;
+
+    std::shared_ptr<T> acquire(long wait_ms = -1)
+    {
+        std::unique_lock<decltype(mtx_)> lk(mtx_);
+
+        if (pool_.empty()) {
+            if (nr_objs_ < max_objs_) {
+                pool_.emplace(builder_());
+                ++nr_objs_;
+
+            } else if (wait_ms == 0) {
+                return nullptr;
+
+            } else if (wait_ms < 0) {
+                cv_.wait(lk, [this] { return !pool_.empty(); });
+
+            } else {
+                bool ok = cv_.wait_for(lk, std::chrono::milliseconds(wait_ms),
+                                       [this] { return !pool_.empty(); });
+                if (!ok) {
+                    return nullptr;
+                }
+            }
+        }
+
+        auto p = std::move(pool_.extract(pool_.begin()).value());
+        return std::shared_ptr<T>(p.release(), [this](T* o) { release(o); });
+    }
+
+  private:
+    size_t max_objs_;
+    size_t nr_objs_;
+    std::function<T*()> builder_;
+    std::unordered_set<std::unique_ptr<T>> pool_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+
+    void release(T* o)
+    {
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        pool_.emplace(o);
+        cv_.notify_one();
+    }
+};
+
+namespace v1 {
+
+template <typename T>
+class object_pool;
 
 template <typename T>
 class pooled_object
@@ -78,7 +143,9 @@ class pooled_object
     pooled_object() = default;
 
     pooled_object(T* o, const std::shared_ptr<pool>& p, const deleter_t& d = {}) noexcept
-        : obj_(o), pool_(p), delete_object_(d)
+        : obj_(o)
+        , pool_(p)
+        , delete_object_(d)
     {
         //
     }
@@ -105,7 +172,7 @@ class object_pool : public std::enable_shared_from_this<object_pool<T>>
     static std::shared_ptr<pool> create(builder_t&& b, deleter_t&& d = {})
     {
         return std::shared_ptr<pool>(
-                new pool(std::forward<builder_t>(b), std::forward<deleter_t>(d)));
+            new pool(std::forward<builder_t>(b), std::forward<deleter_t>(d)));
     }
     static std::shared_ptr<pool> create(const option& opt)
     {
@@ -173,7 +240,8 @@ class object_pool : public std::enable_shared_from_this<object_pool<T>>
         }
     }
 
-    explicit object_pool(const option& opt) : opts_(opt)
+    explicit object_pool(const option& opt)
+        : opts_(opt)
     {
         if (!opts_.new_object) {
             throw std::logic_error("object_pool: builder not callable");
@@ -187,7 +255,7 @@ class object_pool : public std::enable_shared_from_this<object_pool<T>>
         cv_.notify_one();
     }
 };
-
+}  // namespace v1
 }  // namespace tbd
 
 #endif

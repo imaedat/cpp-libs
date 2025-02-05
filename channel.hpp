@@ -2,22 +2,25 @@
 #define CHANNEL_HPP_
 
 #include <errno.h>
-#include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <optional>
 #include <stdexcept>
 #include <system_error>
+#include <type_traits>
 #include <utility>
 
 namespace tbd {
 
 // multi-producer, single-consumer channel
 
-template <typename T> class sender;
-template <typename T> class receiver;
+template <typename T>
+class sender;
+template <typename T>
+class receiver;
 
 template <typename T>
 std::pair<sender<T>, receiver<T>> new_channel()
@@ -71,11 +74,11 @@ class receiver
         T msg;
         auto nread = ::read(fd_, &msg, sizeof(T));
         if (nread == sizeof(T)) {
-          return msg;
+            return msg;
         }
 
         if (nread == 0) {
-          return std::nullopt;
+            return std::nullopt;
         }
 
         throw std::system_error(errno, std::generic_category());
@@ -88,7 +91,9 @@ class receiver
 
   private:
     int fd_ = -1;
-    explicit receiver(int fd) noexcept : fd_(fd) {}
+    explicit receiver(int fd) noexcept
+        : fd_(fd)
+    {}
 
     friend std::pair<sender<T>, receiver<T>> new_channel<T>();
 };
@@ -144,12 +149,24 @@ class sender
         }
     }
 
+    template <typename U,
+              std::enable_if_t<std::is_same<T, typename std::remove_reference<U>::type>::value,
+                               std::nullptr_t> = nullptr>
+    void send(U&& msg) const
+    {
+        if (::write(fd_, &msg, sizeof(T)) < 0) {
+            throw std::system_error(errno, std::generic_category());
+        }
+    }
+
   private:
-    std::atomic<uint64_t> *refcnt_ = nullptr;
+    std::atomic<uint64_t>* refcnt_ = nullptr;
     int fd_ = -1;
 
     explicit sender(int fd)
-        : refcnt_(new std::atomic<uint64_t>(1)), fd_(fd) {}
+        : refcnt_(new std::atomic<uint64_t>(1))
+        , fd_(fd)
+    {}
 
     friend std::pair<sender<T>, receiver<T>> new_channel<T>();
 };

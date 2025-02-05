@@ -2,14 +2,16 @@
 #define DEFER_BLOCK_HPP_
 
 #include <functional>
+#include <type_traits>
 
 namespace tbd {
 
 class defer_block
 {
   public:
-    explicit defer_block(std::function<void()>&& fn) noexcept
-        : fn_(std::forward<std::function<void()>>(fn))
+    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    explicit defer_block(F&& fn) noexcept
+        : fn_(std::forward<F>(fn))
     {}
 
     defer_block(const defer_block&) = delete;

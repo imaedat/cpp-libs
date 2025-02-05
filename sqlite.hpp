@@ -13,7 +13,7 @@ namespace tbd {
 class sqlite
 {
     class transaction;
-    using query_cb_t = std::function<void(int,char**)>;
+    using query_cb_t = std::function<void(int, char**)>;
 
   public:
     explicit sqlite(std::string_view dbfile = ":memory:")
@@ -74,15 +74,15 @@ class sqlite
     // `user_cb` called for each row
     void query(std::string_view sql, const query_cb_t& user_cb)
     {
-        exec_(sql, query_cb, (void *)&user_cb);
+        exec_(sql, query_cb, (void*)&user_cb);
     }
 
   private:
-    sqlite3 *db_ = nullptr;
+    sqlite3* db_ = nullptr;
 
-    void exec_(std::string_view sql, int (*cb)(void*,int,char**,char**), void *args)
+    void exec_(std::string_view sql, int (*cb)(void*, int, char**, char**), void* args)
     {
-        char *mbuf = nullptr;
+        char* mbuf = nullptr;
         int rc = sqlite3_exec(db_, sql.data(), cb, args, &mbuf);
         if (rc != SQLITE_OK) {
             std::string msg("(unknown)");
@@ -94,7 +94,7 @@ class sqlite
         }
     }
 
-    void close()
+    void close() noexcept
     {
         if (db_) {
             sqlite3_close(db_);
@@ -102,23 +102,23 @@ class sqlite
         }
     }
 
-    static int count_cb(void *count, int ncolumns, char **values, char **names)
+    static int count_cb(void* count, int ncolumns, char** values, char** names)
     {
         (void)ncolumns;
         (void)names;
         try {
-            *(int64_t *)count = std::stoll(values[0]);
+            *(int64_t*)count = std::stoll(values[0]);
         } catch (...) {
-            *(int64_t *)count = -1;
+            *(int64_t*)count = -1;
         }
         return 0;
     }
 
-    static int query_cb(void *user_cb, int ncolumns, char **values, char **names)
+    static int query_cb(void* user_cb, int ncolumns, char** values, char** names)
     {
         (void)ncolumns;
         (void)names;
-        (*(query_cb_t *)user_cb)(ncolumns, values);
+        (*(query_cb_t*)user_cb)(ncolumns, values);
         return 0;
     }
 
@@ -127,8 +127,22 @@ class sqlite
       public:
         transaction(const transaction&) = delete;
         transaction& operator=(const transaction&) = delete;
-        transaction(transaction&&) noexcept = default;
-        transaction& operator=(transaction&&) noexcept = default;
+        transaction(transaction&& rhs) noexcept
+            : db_(rhs.db_)
+            , completed_(rhs.completed_)
+        {
+            rhs.completed_ = true;
+        }
+        transaction& operator=(transaction&& rhs) noexcept
+        {
+            if (this != &rhs) {
+                db_ = std::move(rhs.db_);
+                completed_ = rhs.completed_;
+                rhs.completed_ = true;
+            }
+            return *this;
+        }
+
         ~transaction()
         {
             rollback();
@@ -173,7 +187,10 @@ class sqlite
         sqlite& db_;
         bool completed_;
 
-        explicit transaction(sqlite& db) noexcept : db_(db), completed_(false) {}
+        explicit transaction(sqlite& db) noexcept
+            : db_(db)
+            , completed_(false)
+        {}
 
         friend class sqlite;
     };

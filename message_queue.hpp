@@ -7,10 +7,10 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
-
 #include <type_traits>
 
 namespace tbd {
@@ -21,14 +21,13 @@ class message_queue
   public:
     message_queue()
         : eventfd_(::eventfd(0, EFD_SEMAPHORE))
-        , queue_mtx_(std::make_unique<typename std::decay<decltype(*queue_mtx_)>::type>())
-#ifdef MESSAGE_QUEUE_TIMEDPOP_MULTIPLE_READERS
-        , reader_mtx_(std::make_unique<typename std::decay<decltype(*reader_mtx_)>::type>())
+        , queue_mtx_(std::make_unique<qmtx_type>())
+#ifdef MESSAGE_QUEUE_MULTIPLE_READERS
+        , reader_mtx_(std::make_unique<rmtx_type>())
 #endif
     {
         if (eventfd_ < 0) {
-            throw std::system_error(errno, std::generic_category(),
-                    "message_queue: eventfd");
+            throw std::system_error(errno, std::generic_category(), "message_queue: eventfd");
         }
     }
 
@@ -44,9 +43,9 @@ class message_queue
         if (this != &rhs) {
             swap(eventfd_, rhs.eventfd_);
             swap(mq_, rhs.mq_);
-            swap(queue_mtx_, rhs.queue_mtx_);
-#ifdef MESSAGE_QUEUE_TIMEDPOP_MULTIPLE_READERS
-            swap(reader_mtx_, rhs.reader_mtx_);
+            queue_mtx_.swap(rhs.queue_mtx_);
+#ifdef MESSAGE_QUEUE_MULTIPLE_READERS
+            reader_mtx_.swap(rhs.reader_mtx_);
 #endif
         }
         return *this;
@@ -65,36 +64,34 @@ class message_queue
         return eventfd_;
     }
 
-    void push(const T& msg)
+    template <typename U,
+              std::enable_if_t<std::is_same<T, typename std::remove_reference<U>::type>::value,
+                               std::nullptr_t> = nullptr>
+    void push(U&& msg)
     {
-        std::lock_guard<decltype(*queue_mtx_)> lk(*queue_mtx_);
-        mq_.push(msg);
-        (void)::write(eventfd_, &one, sizeof(one));
-    }
+        static constexpr uint64_t one = 1;
 
-    void push(T&& msg)
-    {
-        std::lock_guard<decltype(*queue_mtx_)> lk(*queue_mtx_);
+        std::lock_guard<qmtx_type> lk(*queue_mtx_);
         mq_.push(std::forward<T>(msg));
         (void)::write(eventfd_, &one, sizeof(one));
     }
 
     T pop()
     {
-#ifdef MESSAGE_QUEUE_TIMEDPOP_MULTIPLE_READERS
-        std::lock_guard<decltype(*reader_mtx_)> lk(*reader_mtx_);
+#ifdef MESSAGE_QUEUE_MULTIPLE_READERS
+        std::lock_guard<rmtx_type> lk(*reader_mtx_);
 #endif
 
-        return pop_internal();
+        return pop_();
     }
 
     std::optional<T> timed_pop(int wait_ms)
     {
         using namespace std::chrono;
 
-#ifdef MESSAGE_QUEUE_TIMEDPOP_MULTIPLE_READERS
+#ifdef MESSAGE_QUEUE_MULTIPLE_READERS
         auto t1 = steady_clock::now();
-        std::unique_lock<decltype(*reader_mtx_)> lk(*reader_mtx_, std::defer_lock);
+        std::unique_lock<rmtx_type> lk(*reader_mtx_, std::defer_lock);
         if (!lk.try_lock_for(std::chrono::milliseconds(wait_ms))) {
             return std::nullopt;
         }
@@ -112,32 +109,32 @@ class message_queue
         int nfds = ::poll(&fds, 1, wait_ms);
         if (nfds < 0) {
             throw std::system_error(errno, std::generic_category(),
-                    "message_queue::timed_pop: poll");
+                                    "message_queue::timed_pop: poll");
         }
 
         if (nfds > 0) {
-            return pop_internal();
+            return pop_();
         } else {
             return std::nullopt;
         }
     }
 
   private:
-    inline static constexpr uint64_t one = 1;
-
     int eventfd_ = -1;
     std::queue<T> mq_;
     std::unique_ptr<std::mutex> queue_mtx_;
-#ifdef MESSAGE_QUEUE_TIMEDPOP_MULTIPLE_READERS
+    using qmtx_type = typename std::decay<decltype(*queue_mtx_)>::type;
+#ifdef MESSAGE_QUEUE_MULTIPLE_READERS
     std::unique_ptr<std::timed_mutex> reader_mtx_;
+    using rmtx_type = typename std::decay<decltype(*reader_mtx_)>::type;
 #endif
 
-    T pop_internal()
+    T pop_()
     {
         uint64_t u;
         (void)::read(eventfd_, &u, sizeof(u));
 
-        std::lock_guard<decltype(*queue_mtx_)> lk(*queue_mtx_);
+        std::lock_guard<qmtx_type> lk(*queue_mtx_);
         T msg = std::move(mq_.front());
         mq_.pop();
         return msg;

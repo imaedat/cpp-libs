@@ -18,7 +18,8 @@
 
 namespace tbd {
 
-struct nulltype {};
+struct nulltype
+{};
 
 template <typename T = nulltype>
 class coroutine_env
@@ -40,10 +41,12 @@ class coroutine_env
         }
 
       private:
-        coroutine_env<T> *env_ = nullptr;
+        coroutine_env<T>* env_ = nullptr;
 
         friend class coroutine_env<T>;
-        explicit yielder(coroutine_env<T> *env) noexcept : env_(env) {}
+        explicit yielder(coroutine_env<T>* env) noexcept
+            : env_(env)
+        {}
     };
 
   private:
@@ -96,12 +99,12 @@ class coroutine_env
       private:
         coro_fn fn_;
         size_t stack_size_;
-        char *stack_ = nullptr;
+        char* stack_ = nullptr;
         bool finished_ = false;
-        coroutine_env<T> *env_ = nullptr;
+        coroutine_env<T>* env_ = nullptr;
         ucontext_t uctx_;
 
-        coroutine(coro_fn&& fn, size_t ss, coroutine_env<T> *env)
+        coroutine(coro_fn&& fn, size_t ss, coroutine_env<T>* env)
             : fn_(std::forward<coro_fn>(fn))
             , stack_size_(ss)
             , stack_(nullptr)
@@ -109,12 +112,11 @@ class coroutine_env
             , env_(env)
         {
             if (::getcontext(&uctx_) < 0) {
-                throw std::system_error(errno, std::generic_category(),
-                        "coroutine: getcontext");
+                throw std::system_error(errno, std::generic_category(), "coroutine: getcontext");
             }
 
             size_t pagesz = ::sysconf(_SC_PAGE_SIZE);
-            stack_ = (char *)::aligned_alloc(pagesz, pagesz + stack_size_);
+            stack_ = (char*)::aligned_alloc(pagesz, pagesz + stack_size_);
             if (!stack_) {
                 throw std::bad_alloc();
             }
@@ -124,10 +126,10 @@ class coroutine_env
             uctx_.uc_stack.ss_size = stack_size_;
             uctx_.uc_link = &env_->uctx_;
 
-            ::makecontext(&uctx_, (void (*)())&execute, 1, this);
+            ::makecontext(&uctx_, (void (*)()) & execute, 1, this);
         }
 
-        static void execute(coroutine *co)
+        static void execute(coroutine* co)
         {
             std::exception_ptr ep;
 
@@ -149,7 +151,9 @@ class coroutine_env
     friend class coroutine;
 
   public:
-    coroutine_env() noexcept : current_(nullptr), yielder_(this)
+    coroutine_env() noexcept
+        : current_(nullptr)
+        , yielder_(this)
     {
         ::memcpy(magic_, MAGIC, sizeof(magic_));
     }
@@ -195,18 +199,17 @@ class coroutine_env
   private:
     char magic_[4];
     ucontext_t uctx_;
-    coroutine *current_;
+    coroutine* current_;
     value_type last_value_;
     yielder yielder_;
 
-    value_type resume(coroutine *co)
+    value_type resume(coroutine* co)
     {
         assert(!current_);
 
         if (co->finished_) {
 #ifdef COROUTINE_EXCEPTION_AGAINST_FINISHED
-            throw std::invalid_argument(
-                    "coroutine_env::resume: coroutine already finished");
+            throw std::invalid_argument("coroutine_env::resume: coroutine already finished");
 #else
             return std::nullopt;
 #endif
@@ -215,7 +218,7 @@ class coroutine_env
         current_ = co;
         if (::swapcontext(&uctx_, &current_->uctx_) < 0) {
             throw std::system_error(errno, std::generic_category(),
-                    "coroutine_env::resume: swapcontext");
+                                    "coroutine_env::resume: swapcontext");
         }
 
         if (last_value_) {
@@ -236,11 +239,11 @@ class coroutine_env
         assert(&current_->env_->uctx_ == &uctx_);
 
         last_value_ = std::forward<value_type>(v);
-        auto *cur_ctx = &current_->uctx_;
+        auto* cur_ctx = &current_->uctx_;
         current_ = nullptr;
         if (::swapcontext(cur_ctx, &uctx_) < 0) {
             throw std::system_error(errno, std::generic_category(),
-                    "coroutine_env::yield: swapcontext");
+                                    "coroutine_env::yield: swapcontext");
         }
     }
 };
