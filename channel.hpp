@@ -142,13 +142,6 @@ class sender
         fd_ = -1;
     }
 
-    void send(const T& msg) const
-    {
-        if (::write(fd_, &msg, sizeof(T)) < 0) {
-            throw std::system_error(errno, std::generic_category());
-        }
-    }
-
     template <typename U,
               std::enable_if_t<std::is_same<T, typename std::remove_reference<U>::type>::value,
                                std::nullptr_t> = nullptr>
