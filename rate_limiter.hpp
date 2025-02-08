@@ -84,47 +84,36 @@ class sliding_window_log : public rate_limiter<Duration>
   public:
     sliding_window_log(uint64_t limit, const Duration& window)
         : rate_limiter<Duration>(limit, window)
+        , amount_in_window_(0)
     {}
 
     bool request(int64_t increments) override
     {
         auto now = std::chrono::steady_clock::now();
-
-        uint64_t amount_in_window = 0;
         auto begging_of_window = now - window_;
-        auto begin = log_.cbegin();
-        bool contains_expired = false;
-        for (auto it = log_.cbegin(); it != log_.cend(); ++it) {
-            if (it->arrived_at >= begging_of_window) {
-                amount_in_window += it->quantity;
-            } else {
-                begin = it;
-                contains_expired = true;
-                break;
-            }
-        }
-
 #ifdef RATE_LIMITR_VERBOSE
         auto before = log_.size();
 #endif
-        if (contains_expired) {
-            log_.erase(begin, log_.cend());
+        while (!log_.empty() && log_.front().arrived_at < begging_of_window) {
+            amount_in_window_ -= log_.front().quantity;
+            log_.pop_front();
         }
+
 #ifdef RATE_LIMITR_VERBOSE
-        auto after = log_.size();
-        auto nerase = before - after;
-        if (amount_in_window + increments <= limit_) {
-            ++after;
-        }
-        printf(" *** nerase=%lu, qsize=%lu, amount_in_window=%lu, increments=%ld ***\n", nerase,
-               after, amount_in_window, increments);
+        auto qsize = log_.size();
+        auto nerased = before - qsize;
+        bool ok = (amount_in_window_ + increments <= (int64_t)limit_);
+        printf(
+            " *** nerased=%lu, qsize=%lu, amount_in_window_=%lu, increments=%ld, result=%s ***\n",
+            nerased, qsize, amount_in_window_, increments, (ok ? "ok" : "ng"));
 #endif
 
-        if (amount_in_window + increments > limit_) {
+        if (amount_in_window_ + increments > (int64_t)limit_) {
             return false;
         }
 
-        log_.emplace_front(log_entry{now, (uint64_t)increments});
+        log_.emplace_back(log_entry{now, (uint64_t)increments});
+        amount_in_window_ += increments;
         return true;
     }
 
@@ -137,7 +126,8 @@ class sliding_window_log : public rate_limiter<Duration>
 
     using rate_limiter<Duration>::limit_;
     using rate_limiter<Duration>::window_;
-    std::deque<log_entry> log_;  // (head) new <-> old (tail)
+    int64_t amount_in_window_;
+    std::deque<log_entry> log_;  // (head) old <-> new (tail)
 };
 
 /****************************************************************************
