@@ -36,7 +36,7 @@ static void handler(int)
     exit(0);
 }
 
-#define r(n) (random() % n)
+#define r(n) (random() % (n))
 
 int main()
 {
