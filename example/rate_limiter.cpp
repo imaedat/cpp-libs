@@ -54,7 +54,7 @@ int main()
     while (true) {
         int count = 1 + r(3);
         auto waitms = r(300);
-        bool ok = lim.request(count);
+        bool ok = lim.try_request(count);
         printf("%s req=%d, result=%s\n", now().c_str(), count, (ok ? "success" : "denied"));
         if (ok) {
             total += count;

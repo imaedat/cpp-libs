@@ -18,7 +18,7 @@ class rate_limiter
 {
   public:
     virtual ~rate_limiter() = default;
-    virtual bool request(int64_t increments) = 0;
+    virtual bool try_request(int64_t increments) = 0;
 
   protected:
     uint64_t limit_;
@@ -42,10 +42,10 @@ class token_bucket : public rate_limiter<Duration>
         , tokens_left_(limit_)
     {}
 
-    bool request(int64_t increments) override
+    bool try_request(int64_t increments) override
     {
         auto now = std::chrono::steady_clock::now();
-        auto elapsed = now - prev_requested_;
+        auto elapsed = now - last_requested_;
 
         if (elapsed >= window_) {
             tokens_left_ = limit_;
@@ -53,7 +53,7 @@ class token_bucket : public rate_limiter<Duration>
             auto acquires = (unsigned)std::round(1.0 * limit_ * elapsed / window_);
             tokens_left_ = std::min(tokens_left_ + acquires, limit_);
         }
-        prev_requested_ = now;
+        last_requested_ = now;
 #ifdef RATE_LIMITR_VERBOSE
         printf(" *** elapsed=%lu ms, tokens_left_=%lu, increments=%ld ***\n",
                std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), tokens_left_,
@@ -72,7 +72,7 @@ class token_bucket : public rate_limiter<Duration>
     using rate_limiter<Duration>::limit_;
     using rate_limiter<Duration>::window_;
     uint64_t tokens_left_;
-    std::chrono::steady_clock::time_point prev_requested_;
+    std::chrono::steady_clock::time_point last_requested_;
 };
 
 /****************************************************************************
@@ -87,7 +87,7 @@ class sliding_window_log : public rate_limiter<Duration>
         , amount_in_window_(0)
     {}
 
-    bool request(int64_t increments) override
+    bool try_request(int64_t increments) override
     {
         auto now = std::chrono::steady_clock::now();
         auto begging_of_window = now - window_;
@@ -141,21 +141,21 @@ class sliding_window_counter : public rate_limiter<Duration>
         : rate_limiter<Duration>(limit, window)
         , currwin_amount_(0)
         , prevwin_amount_(0)
-        , next_reset_(std::chrono::steady_clock::now() + window_)
+        , end_of_window_(std::chrono::steady_clock::now() + window_)
     {}
 
-    bool request(int64_t increments) override
+    bool try_request(int64_t increments) override
     {
         auto now = std::chrono::steady_clock::now();
 
-        if (now >= next_reset_) {
-            auto periods = (unsigned)std::ceil(1.0 * (now - next_reset_) / window_);
+        if (now >= end_of_window_) {
+            auto periods = (unsigned)std::ceil(1.0 * (now - end_of_window_) / window_);
             prevwin_amount_ = (periods == 1) ? currwin_amount_ : 0;
             currwin_amount_ = 0;
-            next_reset_ += window_ * periods;
+            end_of_window_ += window_ * periods;
         }
 
-        auto prevwin_weight = 1.0 * (next_reset_ - now) / window_;
+        auto prevwin_weight = 1.0 * (end_of_window_ - now) / window_;
         auto currwin_space = limit_ - currwin_amount_ - (prevwin_amount_ * prevwin_weight);
 #ifdef RATE_LIMITR_VERBOSE
         printf(" *** prevwin_weight=%f, currwin_space=%f, increments=%ld ***\n", prevwin_weight,
@@ -174,7 +174,7 @@ class sliding_window_counter : public rate_limiter<Duration>
     using rate_limiter<Duration>::window_;
     uint64_t currwin_amount_;
     uint64_t prevwin_amount_;
-    std::chrono::steady_clock::time_point next_reset_;
+    std::chrono::steady_clock::time_point end_of_window_;
 };
 
 }  // namespace tbd
