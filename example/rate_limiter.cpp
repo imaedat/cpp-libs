@@ -47,8 +47,8 @@ int main()
     auto limit = 10;
     auto window = 1s;
     // token_bucket lim(limit, window);
-    sliding_window_log lim(limit, window);
-    // sliding_window_counter lim(limit, window);
+    // sliding_window_log lim(limit, window);
+    sliding_window_counter lim(limit, window);
 
     start = steady_clock::now();
     while (true) {

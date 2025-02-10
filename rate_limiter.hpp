@@ -1,11 +1,11 @@
 #ifndef RATE_LIMITR_HPP_
 #define RATE_LIMITR_HPP_
 
+#include <chrono>
+#include <cmath>
 #ifdef RATE_LIMITR_VERBOSE
 #include <cstdio>
 #endif
-#include <chrono>
-#include <cmath>
 #include <deque>
 
 namespace tbd {
@@ -18,7 +18,7 @@ class rate_limiter
 {
   public:
     virtual ~rate_limiter() = default;
-    virtual bool try_request(int64_t increments) = 0;
+    virtual bool try_request(int64_t quantity) = 0;
 
   protected:
     uint64_t limit_;
@@ -42,29 +42,31 @@ class token_bucket : public rate_limiter<Duration>
         , tokens_left_(limit_)
     {}
 
-    bool try_request(int64_t increments) override
+    bool try_request(int64_t quantity) override
     {
         auto now = std::chrono::steady_clock::now();
         auto elapsed = now - last_requested_;
 
+        unsigned refills = 0;
         if (elapsed >= window_) {
             tokens_left_ = limit_;
         } else {
-            auto acquires = (unsigned)std::round(1.0 * limit_ * elapsed / window_);
-            tokens_left_ = std::min(tokens_left_ + acquires, limit_);
+            refills = (unsigned)std::round(1.0 * limit_ * elapsed / window_);
+            tokens_left_ = std::min(tokens_left_ + refills, limit_);
         }
         last_requested_ = now;
 #ifdef RATE_LIMITR_VERBOSE
-        printf(" *** elapsed=%lu ms, tokens_left_=%lu, increments=%ld ***\n",
-               std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), tokens_left_,
-               increments);
+        printf(
+            " *** [token_bucket] elapsed=%lu ms, refills=%u, tokens_left_=%lu, quantity=%ld ***\n",
+            std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), refills,
+            tokens_left_, quantity);
 #endif
 
-        if (increments > (int64_t)tokens_left_) {
+        if (quantity > (int64_t)tokens_left_) {
             return false;
         }
 
-        tokens_left_ -= increments;
+        tokens_left_ -= quantity;
         return true;
     }
 
@@ -87,7 +89,7 @@ class sliding_window_log : public rate_limiter<Duration>
         , amount_in_window_(0)
     {}
 
-    bool try_request(int64_t increments) override
+    bool try_request(int64_t quantity) override
     {
         auto now = std::chrono::steady_clock::now();
         auto begging_of_window = now - window_;
@@ -102,18 +104,18 @@ class sliding_window_log : public rate_limiter<Duration>
 #ifdef RATE_LIMITR_VERBOSE
         auto qsize = log_.size();
         auto nerased = before - qsize;
-        bool ok = (amount_in_window_ + increments <= (int64_t)limit_);
+        bool ok = (amount_in_window_ + quantity <= (int64_t)limit_);
         printf(
-            " *** nerased=%lu, qsize=%lu, amount_in_window_=%lu, increments=%ld, result=%s ***\n",
-            nerased, qsize, amount_in_window_, increments, (ok ? "ok" : "ng"));
+            " *** [sliding_window_log] nerased=%lu, qsize=%lu, amount_in_window_=%lu, quantity=%ld, result=%s ***\n",
+            nerased, qsize, amount_in_window_, quantity, (ok ? "ok" : "ng"));
 #endif
 
-        if (amount_in_window_ + increments > (int64_t)limit_) {
+        if (amount_in_window_ + quantity > (int64_t)limit_) {
             return false;
         }
 
-        log_.emplace_back(log_entry{now, (uint64_t)increments});
-        amount_in_window_ += increments;
+        log_.emplace_back(log_entry{now, (uint64_t)quantity});
+        amount_in_window_ += quantity;
         return true;
     }
 
@@ -144,7 +146,7 @@ class sliding_window_counter : public rate_limiter<Duration>
         , end_of_window_(std::chrono::steady_clock::now() + window_)
     {}
 
-    bool try_request(int64_t increments) override
+    bool try_request(int64_t quantity) override
     {
         auto now = std::chrono::steady_clock::now();
 
@@ -158,14 +160,15 @@ class sliding_window_counter : public rate_limiter<Duration>
         auto prevwin_weight = 1.0 * (end_of_window_ - now) / window_;
         auto currwin_space = limit_ - currwin_amount_ - (prevwin_amount_ * prevwin_weight);
 #ifdef RATE_LIMITR_VERBOSE
-        printf(" *** prevwin_weight=%f, currwin_space=%f, increments=%ld ***\n", prevwin_weight,
-               currwin_space, increments);
+        printf(
+            " *** [sliding_window_counter] prevwin_weight=%f, currwin_space=%f, quantity=%ld ***\n",
+            prevwin_weight, currwin_space, quantity);
 #endif
-        if (increments > (int64_t)std::ceil(currwin_space)) {
+        if (quantity > (int64_t)std::ceil(currwin_space)) {
             return false;
         }
 
-        currwin_amount_ += increments;
+        currwin_amount_ += quantity;
         return true;
     }
 

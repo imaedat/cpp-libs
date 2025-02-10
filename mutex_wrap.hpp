@@ -4,20 +4,26 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 
 namespace tbd {
 
-template <typename T>
+template <typename T, typename M = std::mutex>
 class mutex_wrap
 {
+  protected:
+    T data_;
+    std::unique_ptr<M> mtx_;
     using Deleter = std::function<void(T*)>;
 
   public:
-    /* explicit */ mutex_wrap(T&& data)
+    mutex_wrap(T&& data)
         : data_(std::move(data))
-        , mtx_(std::make_unique<mtxtype>())
+        , mtx_(std::make_unique<M>())
     {}
+
+    virtual ~mutex_wrap() = default;
 
     std::unique_ptr<T, Deleter> lock()
     {
@@ -32,10 +38,34 @@ class mutex_wrap
         });
     }
 
-  private:
-    T data_;
-    std::unique_ptr<std::mutex> mtx_;
-    using mtxtype = typename std::decay<decltype(*mtx_)>::type;
+    M& operator*() const noexcept
+    {
+        return *mtx_;
+    }
+};
+
+template <typename T>
+class rwlock_wrap : public mutex_wrap<T, std::shared_mutex>
+{
+    using Deleter = typename mutex_wrap<T, std::shared_mutex>::Deleter;
+
+  public:
+    rwlock_wrap(T&& data)
+        : mutex_wrap<T, std::shared_mutex>(std::move(data))
+    {}
+
+    std::unique_ptr<T, Deleter> lock_shared()
+    {
+        if (!this->mtx_) {
+            throw std::runtime_error("rwlock_wrap: already moved away");
+        }
+
+        this->mtx_->lock_shared();
+        return std::unique_ptr<T, Deleter>(&this->data_, [this](T* p) {
+            (void)p;
+            this->mtx_->unlock_shared();
+        });
+    }
 };
 
 }  // namespace tbd
