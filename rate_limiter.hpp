@@ -47,7 +47,7 @@ class token_bucket : public rate_limiter<Duration>
         auto now = std::chrono::steady_clock::now();
         auto elapsed = now - last_requested_;
 
-        unsigned refills = 0;
+        [[maybe_unused]] unsigned refills = 0;
         if (elapsed >= window_) {
             tokens_left_ = limit_;
         } else {
