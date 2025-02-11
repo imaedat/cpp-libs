@@ -6,6 +6,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
+#include <type_traits>
 
 namespace tbd {
 
@@ -17,6 +18,13 @@ class mutex_wrap
     std::unique_ptr<M> mtx_;
     using Deleter = std::function<void(T*)>;
 
+    void assert_mutex_alive() const
+    {
+        if (!mtx_) {
+            throw std::runtime_error("mutex_wrap: already moved away");
+        }
+    }
+
   public:
     mutex_wrap(T&& data)
         : data_(std::move(data))
@@ -27,15 +35,22 @@ class mutex_wrap
 
     std::unique_ptr<T, Deleter> lock()
     {
-        if (!mtx_) {
-            throw std::runtime_error("mutex_wrap: already moved away");
-        }
+        assert_mutex_alive();
 
         mtx_->lock();
         return std::unique_ptr<T, Deleter>(&data_, [this](T* p) {
             (void)p;
             mtx_->unlock();
         });
+    }
+
+    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    void lock(F&& fn)
+    {
+        assert_mutex_alive();
+
+        std::lock_guard<M> lk(*mtx_);
+        fn(data_);
     }
 
     M& operator*() const noexcept
@@ -56,15 +71,22 @@ class rwlock_wrap : public mutex_wrap<T, std::shared_mutex>
 
     std::unique_ptr<T, Deleter> lock_shared()
     {
-        if (!this->mtx_) {
-            throw std::runtime_error("rwlock_wrap: already moved away");
-        }
+        this->assert_mutex_alive();
 
         this->mtx_->lock_shared();
         return std::unique_ptr<T, Deleter>(&this->data_, [this](T* p) {
             (void)p;
             this->mtx_->unlock_shared();
         });
+    }
+
+    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    void lock_shared(F&& fn)
+    {
+        this->assert_mutex_alive();
+
+        std::shared_lock<std::shared_mutex> lk(*this->mtx_);
+        fn(this->data_);
     }
 };
 
