@@ -90,6 +90,7 @@ int main()
 
     auto count = db.count("select count(*) from testtab;");
 
+    // callback style
     vector<record> records;
     records.reserve(count);
     db.query("select * from testtab order by id;", [&records](int ncolumns, char** columns) {
@@ -99,6 +100,23 @@ int main()
     });
     for (const auto& r : records) {
         cout << r.to_string() << endl;
+    }
+
+    puts("---");
+
+    // cursor style
+    auto cur = db.cursor_for("select * from testtab order by name;");
+    while (true) {
+        auto row_opt = cur.next();
+        if (!row_opt) {
+            break;
+        }
+        const auto& row = *row_opt;
+        cout << "#cols=" << row.column_count() << ": ";
+        for (const auto& col : row) {
+            cout << col << " ";
+        }
+        cout << endl;
     }
 
     return 0;

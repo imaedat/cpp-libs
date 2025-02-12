@@ -2,9 +2,11 @@
 #define SQLITE_HPP_
 
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <sqlite3.h>
 
@@ -13,15 +15,18 @@ namespace tbd {
 class sqlite
 {
     class transaction;
+    class cursor;
+    class row;
     using query_cb_t = std::function<void(int, char**)>;
 
   public:
     explicit sqlite(std::string_view dbfile = ":memory:")
     {
-        int rc = sqlite3_open(dbfile.data(), &db_);
-        if (rc != SQLITE_OK) {
+        int ec = sqlite3_open(dbfile.data(), &db_);
+        if (ec != SQLITE_OK) {
+            std::string msg(sqlite3_errstr(ec));
             close();
-            throw std::runtime_error("sqlite3_open failed");
+            throw std::runtime_error("sqlite3_open: " + msg);
         }
     }
 
@@ -77,20 +82,25 @@ class sqlite
         exec_(sql, query_cb, (void*)&user_cb);
     }
 
+    cursor cursor_for(std::string_view query)
+    {
+        return cursor(db_, query);
+    }
+
   private:
     sqlite3* db_ = nullptr;
 
     void exec_(std::string_view sql, int (*cb)(void*, int, char**, char**), void* args)
     {
         char* mbuf = nullptr;
-        int rc = sqlite3_exec(db_, sql.data(), cb, args, &mbuf);
-        if (rc != SQLITE_OK) {
+        int ec = sqlite3_exec(db_, sql.data(), cb, args, &mbuf);
+        if (ec != SQLITE_OK) {
             std::string msg("(unknown)");
             if (mbuf) {
                 msg = std::string(mbuf);
                 sqlite3_free(mbuf);
             }
-            throw std::runtime_error("sqlite3_exec failed: " + msg);
+            throw std::runtime_error("sqlite3_exec: " + msg);
         }
     }
 
@@ -122,6 +132,9 @@ class sqlite
         return 0;
     }
 
+    /************************************************************************
+     * transaction
+     */
     class transaction
     {
       public:
@@ -193,6 +206,112 @@ class sqlite
         {}
 
         friend class sqlite;
+    };
+
+    /************************************************************************
+     * cursor
+     */
+    class cursor
+    {
+      public:
+        cursor(const cursor&) = delete;
+        cursor& operator=(const cursor&) = delete;
+        cursor(cursor&& rhs) noexcept
+        {
+            *this = std::move(rhs);
+        }
+        cursor& operator=(cursor&& rhs) noexcept
+        {
+            using std::swap;
+            if (this != &rhs) {
+                swap(stmt_, rhs.stmt_);
+            }
+            return *this;
+        }
+
+        ~cursor()
+        {
+            if (stmt_) {
+                sqlite3_finalize(stmt_);
+                stmt_ = nullptr;
+            }
+        }
+
+        std::optional<const row> next()
+        {
+            auto ec = sqlite3_step(stmt_);
+
+            if (ec == SQLITE_DONE) {
+                return std::nullopt;
+            }
+
+            if (ec != SQLITE_ROW) {
+                std::string msg(sqlite3_errstr(ec));
+                throw std::runtime_error("sqlite3_step: " + msg);
+            }
+
+            auto ncols = sqlite3_data_count(stmt_);
+            const unsigned char *columns[ncols];
+            for (auto i = 0; i < ncols; ++i) {
+                columns[i] = sqlite3_column_text(stmt_, i);
+            }
+            return row(ncols, columns);
+        }
+
+      private:
+        sqlite3_stmt *stmt_ = nullptr;
+
+        cursor(sqlite3 *db, std::string_view query)
+        {
+            auto ec = sqlite3_prepare_v2(db, query.data(), -1, &stmt_, 0);
+            if (ec != SQLITE_OK) {
+                std::string msg(sqlite3_errstr(ec));
+                throw std::runtime_error("sqlite3_prepare_v2: " + msg);
+            }
+        }
+
+        friend class sqlite;
+    };
+
+    /************************************************************************
+     * row
+     */
+    class row
+    {
+      private:
+        std::vector<std::string> columns_;
+        using iterator = typename decltype(columns_)::const_iterator;
+
+        row(size_t ncols, const unsigned char **cols)
+        {
+            columns_.reserve(ncols);
+            for (size_t i = 0; i < ncols; ++i) {
+                columns_.emplace_back((const char*)cols[i]);
+            }
+        }
+
+        friend class cursor;
+
+      public:
+        const iterator begin() const
+        {
+            return columns_.cbegin();
+        }
+
+        const iterator end() const
+        {
+            return columns_.cend();
+        }
+
+        const std::string& operator[](size_t index) const
+        {
+            return columns_.at(index);
+        }
+
+        size_t column_count() const noexcept
+        {
+            return columns_.size();
+        }
     };
 };
 
