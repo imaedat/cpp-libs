@@ -93,11 +93,13 @@ int main()
     // callback style
     vector<record> records;
     records.reserve(count);
-    db.query("select * from testtab order by id;", [&records](int ncolumns, char** columns) {
-        // callback per each row
-        (void)ncolumns;
-        records.emplace_back(columns[0], columns[1], columns[2]);
-    });
+    db.query("select * from testtab order by id;",
+             [&records](int ncolumns, char** columns, char** names) {
+                 // callback per each row
+                 (void)ncolumns;
+                 (void)names;
+                 records.emplace_back(columns[0], columns[1], columns[2]);
+             });
     for (const auto& r : records) {
         cout << r.to_string() << endl;
     }
@@ -113,8 +115,8 @@ int main()
         }
         const auto& row = *row_opt;
         cout << "#cols=" << row.column_count() << ": ";
-        for (const auto& col : row) {
-            cout << col << " ";
+        for (const auto& field : row) {
+            cout << field.name() << "=" << field.to_s() << " ";
         }
         cout << endl;
     }

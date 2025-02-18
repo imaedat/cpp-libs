@@ -17,7 +17,8 @@ class sqlite
     class transaction;
     class cursor;
     class row;
-    using query_cb_t = std::function<void(int, char**)>;
+    class field;
+    using query_cb_t = std::function<void(int, char**, char**)>;
 
   public:
     explicit sqlite(std::string_view dbfile = ":memory:")
@@ -128,7 +129,7 @@ class sqlite
     {
         (void)ncolumns;
         (void)names;
-        (*(query_cb_t*)user_cb)(ncolumns, values);
+        (*(query_cb_t*)user_cb)(ncolumns, values, names);
         return 0;
     }
 
@@ -251,17 +252,19 @@ class sqlite
             }
 
             auto ncols = sqlite3_data_count(stmt_);
-            const unsigned char *columns[ncols];
+            const char* names[ncols];
+            const unsigned char* values[ncols];
             for (auto i = 0; i < ncols; ++i) {
-                columns[i] = sqlite3_column_text(stmt_, i);
+                names[i] = sqlite3_column_name(stmt_, i);
+                values[i] = sqlite3_column_text(stmt_, i);
             }
-            return row(ncols, columns);
+            return row(ncols, names, values);
         }
 
       private:
-        sqlite3_stmt *stmt_ = nullptr;
+        sqlite3_stmt* stmt_ = nullptr;
 
-        cursor(sqlite3 *db, std::string_view query)
+        cursor(sqlite3* db, std::string_view query)
         {
             auto ec = sqlite3_prepare_v2(db, query.data(), -1, &stmt_, 0);
             if (ec != SQLITE_OK) {
@@ -279,14 +282,15 @@ class sqlite
     class row
     {
       private:
-        std::vector<std::string> columns_;
-        using iterator = typename decltype(columns_)::const_iterator;
+        std::vector<field> fields_;
+        using iterator = typename decltype(fields_)::const_iterator;
 
-        row(size_t ncols, const unsigned char **cols)
+        row(size_t ncols, const char** names, const unsigned char** values)
         {
-            columns_.reserve(ncols);
+            fields_.reserve(ncols);
             for (size_t i = 0; i < ncols; ++i) {
-                columns_.emplace_back((const char*)cols[i]);
+                field f((const char*)names[i], (const char*)values[i]);
+                fields_.push_back(std::move(f));
             }
         }
 
@@ -295,23 +299,72 @@ class sqlite
       public:
         const iterator begin() const
         {
-            return columns_.cbegin();
+            return fields_.cbegin();
         }
 
         const iterator end() const
         {
-            return columns_.cend();
+            return fields_.cend();
         }
 
-        const std::string& operator[](size_t index) const
+        const field& operator[](size_t index) const
         {
-            return columns_.at(index);
+            return fields_.at(index);
+        }
+
+        const field& operator[](std::string_view name) const
+        {
+            for (const auto& f : fields_) {
+                if (f.name() == name) {
+                    return f;
+                }
+            }
+
+            throw std::out_of_range("");
         }
 
         size_t column_count() const noexcept
         {
-            return columns_.size();
+            return fields_.size();
         }
+    };
+
+    /************************************************************************
+     * field
+     */
+    class field
+    {
+      public:
+        const std::string& name() const noexcept
+        {
+            return name_;
+        }
+
+        const std::string& to_s() const noexcept
+        {
+            return value_;
+        }
+
+        int64_t to_i() const
+        {
+            return std::stoll(value_);
+        }
+
+        double to_f() const
+        {
+            return std::stod(value_);
+        }
+
+      private:
+        std::string name_;
+        std::string value_;
+
+        field(const char* name, const char* value)
+            : name_(name)
+            , value_(value)
+        {}
+
+        friend class row;
     };
 };
 
