@@ -10,22 +10,63 @@
 
 namespace tbd {
 
+namespace detail {
+void close(int& fd)
+{
+    if (fd >= 0) {
+        ::close(fd);
+        fd = -1;
+    }
+}
+}  // namespace detail
+
+class engine;
 class event
 {
   public:
-    virtual ~event() = default;
-    virtual int handle() const noexcept = 0;
+    event(const event&) = delete;
+    event& operator=(const event&) = delete;
+    event(event&& rhs) noexcept
+    {
+        *this = std::move(rhs);
+    }
+    event& operator=(event&& rhs) noexcept
+    {
+        using std::swap;
+        if (this != &rhs) {
+            swap(fd_, rhs.fd_);
+            swap(engine_, rhs.engine_);
+        }
+        return *this;
+    }
+
+    virtual ~event()
+    {
+        detail::close(fd_);
+    }
+
+    int handle() const noexcept
+    {
+        return fd_;
+    }
+
     virtual void top_half(int)
     {
         // urgent work
     }
+
     virtual void bottom_half(int)
     {
         // non-urgent, follow-up work
     }
 
   protected:
-    event() = default;
+    int fd_ = -1;
+    engine* engine_ = nullptr;
+
+    event(engine& eng)
+        : engine_(&eng)
+    {}
 };
 
 class engine
@@ -41,10 +82,7 @@ class engine
 
     virtual ~engine()
     {
-        if (epollfd_ >= 0) {
-            ::close(epollfd_);
-            epollfd_ = -1;
-        }
+        detail::close(epollfd_);
     }
 
     void register_event(int fd, event* ev, bool oneshot = true)

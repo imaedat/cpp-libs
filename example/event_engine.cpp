@@ -14,77 +14,29 @@ using namespace tbd;
 
 #define gettid() syscall(SYS_gettid)
 
-struct socket_event : public event
-{
-    int fd_;
-    int peer_fd_;
-    engine* eng_;
-
-    socket_event(engine& eng)
-        : eng_(&eng)
-    {
-        int fds[2];
-        socketpair(AF_UNIX, SOCK_DGRAM, 0, fds);
-        fd_ = fds[0];
-        peer_fd_ = fds[1];
-
-        eng_->register_event(fd_, this);
-    }
-
-    int handle() const noexcept override
-    {
-        return fd_;
-    }
-
-    void top_half(int) override
-    {
-        //
-    }
-
-    void bottom_half(int) override
-    {
-        char msg[1024];
-        read(fd_, msg, sizeof(msg));
-        printf("%05ld (socket bot): receive message: %s\n", gettid(), msg);
-        eng_->register_event(fd_, this);
-    }
-
-    void notify(string_view msg)
-    {
-        write(peer_fd_, msg.data(), msg.size());
-    }
-};
-
 struct timer_event : public event
 {
-    int fd_;
-    engine* eng_;
-
     timer_event(engine& eng)
-        : fd_(::timerfd_create(CLOCK_MONOTONIC, 0))
-        , eng_(&eng)
+        : event(eng)
     {
+        fd_ = timerfd_create(CLOCK_MONOTONIC, 0);
         reset_timer();
-        eng_->register_event(fd_, this);
-    }
-
-    int handle() const noexcept override
-    {
-        return fd_;
+        engine_->register_event(fd_, this);
     }
 
     void top_half(int) override
     {
         int64_t count;
         read(fd_, &count, sizeof(count));
-        // printf("%05ld (timer  top): timer expired\n", gettid());
+        engine_->deregister_event(fd_);
+        printf("%05ld (timer  top): timer expired\n", gettid());
     }
 
     void bottom_half(int) override
     {
         printf("%05ld (timer  bot): set new timer\n", gettid());
         reset_timer();
-        eng_->register_event(fd_, this);
+        engine_->register_event(fd_, this);
     }
 
     void reset_timer()
@@ -98,42 +50,88 @@ struct timer_event : public event
 
 struct signal_event : public event
 {
-    int fd_;
-    engine* eng_;
+    int last_sig_;
 
     signal_event(engine& eng)
-        : eng_(&eng)
+        : event(eng)
     {
         sigset_t mask;
         sigemptyset(&mask);
-        sigaddset(&mask, SIGUSR1);
+        sigaddset(&mask, SIGHUP);
+        sigaddset(&mask, SIGQUIT);
         fd_ = signalfd(-1, &mask, 0);
 
-        eng_->register_event(fd_, this);
-    }
-
-    int handle() const noexcept override
-    {
-        return fd_;
+        engine_->register_event(fd_, this);
     }
 
     void top_half(int) override
     {
-        //
+        struct signalfd_siginfo siginfo;
+        read(fd_, &siginfo, sizeof(siginfo));
+        engine_->deregister_event(fd_);
+
+        last_sig_ = siginfo.ssi_signo;
+
+        if (last_sig_ == SIGQUIT) {
+            printf("%05ld (signal top): receive signal: %s, exit\n", gettid(),
+                   strsignal(last_sig_));
+            throw 1;
+        }
     }
 
     void bottom_half(int) override
     {
-        struct signalfd_siginfo siginfo;
-        read(fd_, &siginfo, sizeof(siginfo));
-        printf("%05ld (signal bot): receive signal: SIGUSR1\n", gettid());
-        eng_->register_event(fd_, this);
+        printf("%05ld (signal bot): receive signal: %s\n", gettid(), strsignal(last_sig_));
+        engine_->register_event(fd_, this);
     }
 };
 
-struct threaded_engine : public engine
+struct socket_event : public event
 {
-    thread_pool pool_;
+    int peer_fd_;
+    char msgbuf_[1024];
+
+    socket_event(engine& eng)
+        : event(eng)
+    {
+        int fds[2];
+        socketpair(AF_UNIX, SOCK_DGRAM, 0, fds);
+        fd_ = fds[0];
+        peer_fd_ = fds[1];
+
+        engine_->register_event(fd_, this);
+    }
+
+    ~socket_event()
+    {
+        close(peer_fd_);
+    }
+
+    void top_half(int) override
+    {
+        auto nread = read(fd_, msgbuf_, sizeof(msgbuf_));
+        engine_->deregister_event(fd_);
+        msgbuf_[nread] = '\0';
+        printf("%05ld (socket top): receive message: %s\n", gettid(), msgbuf_);
+    }
+
+    void bottom_half(int) override
+    {
+        auto ms = random() % 1000;
+        printf("%05ld (socket bot): work for %ld ms ...\n", gettid(), ms);
+        usleep(ms * 1000);
+        engine_->register_event(fd_, this);
+    }
+
+    void send(string_view msg)
+    {
+        write(peer_fd_, msg.data(), msg.size());
+    }
+};
+
+struct multithreaded_engine : public engine
+{
+    thread_pool pool_{4};
 
     void exec_bh(event* ev) override
     {
@@ -145,33 +143,45 @@ int main()
 {
     sigset_t mask;
     sigemptyset(&mask);
-    sigaddset(&mask, SIGUSR1);
+    sigaddset(&mask, SIGHUP);
+    sigaddset(&mask, SIGQUIT);
     pthread_sigmask(SIG_BLOCK, &mask, nullptr);
 
     srandom(time(nullptr));
 
     // engine eng;
-    threaded_engine eng;
+    multithreaded_engine eng;
 
-    socket_event sock(eng);
     timer_event timer(eng);
     signal_event sigev(eng);
+    socket_event sock(eng);
 
     thread_pool pool;
 
-    pool.submit([&sock] {
-        while (true) {
-            usleep((random() % 3000) * 1000);
-            sock.notify("Hello!");
-        }
-    });
-
     pool.submit([] {
-        while (true) {
+        for (auto i = 0; i < 4; ++i) {
             usleep((1000 + random() % 5000) * 1000);
-            kill(getpid(), SIGUSR1);
+            kill(getpid(), SIGHUP);
+        }
+
+        usleep((1000 + random() % 5000) * 1000);
+        kill(getpid(), SIGQUIT);
+    });
+
+    bool running = true;
+    pool.submit([&sock, &running] {
+        while (running) {
+            usleep((random() % 3000) * 1000);
+            sock.send("Hello!");
         }
     });
 
-    eng.run_loop();
+    try {
+        eng.run_loop();
+    } catch (...) {
+        // ignore
+    }
+
+    running = false;
+    pool.force_stop();
 }
