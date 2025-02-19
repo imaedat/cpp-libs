@@ -18,10 +18,12 @@
 
 namespace tbd {
 
-struct nulltype
+namespace detail {
+struct null_type
 {};
+}  // namespace detail
 
-template <typename T = nulltype>
+template <typename T = detail::null_type>
 class coroutine_env
 {
     using value_type = std::optional<T>;
@@ -31,7 +33,6 @@ class coroutine_env
     class yielder
     {
       public:
-        yielder() = default;
         void operator()(value_type&& v = {}) const
         {
             if (!env_ || ::memcmp(env_, MAGIC, sizeof(MAGIC)) != 0) {
@@ -43,10 +44,12 @@ class coroutine_env
       private:
         coroutine_env<T>* env_ = nullptr;
 
-        friend class coroutine_env<T>;
+        yielder() = default;
         explicit yielder(coroutine_env<T>* env) noexcept
             : env_(env)
         {}
+
+        friend class coroutine_env<T>;
     };
 
   private:
@@ -169,6 +172,7 @@ class coroutine_env
         using std::swap;
         if (this != &rhs) {
             ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
+            ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
             uctx_ = rhs.uctx_;
             swap(current_, rhs.current_);
             swap(last_value_, rhs.last_value_);
@@ -233,7 +237,7 @@ class coroutine_env
         }
     }
 
-    void yield(value_type&& v = std::nullopt)
+    void yield(value_type&& v = {})
     {
         assert(current_);
         assert(&current_->env_->uctx_ == &uctx_);
