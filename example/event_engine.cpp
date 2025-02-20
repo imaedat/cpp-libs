@@ -182,11 +182,12 @@ int main()
     socket_event sock(eng);
     socket_event sock2(eng);
     socket_event sock3(eng);
+    socket_event sock4(eng);
 
     thread_pool pool(2);
 
     pool.submit([] {
-        for (auto i = 0; i < 4; ++i) {
+        for (auto i = 0; i < 10; ++i) {
             usleep((1000 + random() % 5000) * 1000);
             kill(getpid(), SIGHUP);
         }
@@ -197,16 +198,17 @@ int main()
 
     bool running = true;
     pool.submit([&] {
-        long i = 0;
         while (running) {
             usleep((random() % 1000) * 1000);
-            auto rem = i++ % 3;
-            if (rem == 0) {
+            auto target = random() % 4;
+            if (target == 0) {
                 sock.send("Hello!");
-            } else if (rem == 1) {
+            } else if (target == 1) {
                 sock2.send("World!");
-            } else {
+            } else if (target == 2) {
                 sock3.send("Foobar!");
+            } else {
+                sock4.send("Hoge-Piyo!");
             }
         }
     });
