@@ -74,11 +74,12 @@ struct timer_event : public event
 struct signal_event : public event
 {
     tbd::signalfd sigfd_;
+    engine* engine_;
     int last_sig_;
 
     signal_event(engine& eng)
-        : event(eng)
-        , sigfd_({SIGHUP, SIGQUIT})
+        : sigfd_({SIGHUP, SIGQUIT})
+        , engine_(&eng)
     {
         fd_ = sigfd_.handle();
         engine_->register_event(this);
@@ -106,9 +107,10 @@ struct socket_event : public event
 {
     int peer_fd_;
     char msgbuf_[1024];
+    engine* engine_;
 
     socket_event(engine& eng)
-        : event(eng)
+        : engine_(&eng)
     {
         int fds[2];
         socketpair(AF_UNIX, SOCK_DGRAM, 0, fds);

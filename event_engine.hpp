@@ -6,21 +6,17 @@
 #include <unistd.h>
 // v2
 #include <sys/eventfd.h>
-#include <sys/timerfd.h>
 // XXX
 #include <stdio.h>
 
 #include <cstring>
 #include <system_error>
 // v2
-//#include <bitset>
+#include <chrono>
 #include <deque>
 #include <list>
 #include <mutex>
-#include <unordered_map>
 #include <unordered_set>
-// XXX
-#include <chrono>
 
 namespace tbd {
 
@@ -34,7 +30,6 @@ void close(int& fd)
 }
 }  // namespace detail
 
-class engine;
 class event
 {
   public:
@@ -49,7 +44,6 @@ class event
         using std::swap;
         if (this != &rhs) {
             swap(fd_, rhs.fd_);
-            swap(engine_, rhs.engine_);
         }
         return *this;
     }
@@ -76,19 +70,16 @@ class event
 
   protected:
     int fd_ = -1;
-    engine* engine_ = nullptr;
 
-    event(engine& eng)
-        : engine_(&eng)
-    {}
+    event() = default;
 };
 
 class engine
 {
   protected:
-    struct timer_expiry
+    struct timer_entry
     {
-        int fd;
+        event* ev;
         long timeout_ms;
         long delta_ms;
     };
@@ -101,7 +92,7 @@ class engine
             return (!timerq_.empty()) ? timerq_.front().delta_ms : -1;
         }
 
-        void add(int fd, long timeout_ms)
+        void add(event* ev, long timeout_ms)
         {
             update();
 
@@ -109,14 +100,14 @@ class engine
                 return;
             }
 
-            assert(!contains(fd));
+            assert(!contains(ev));
 
-            in_timerq_.insert(fd);
-            timer_expiry new_expiry{fd, timeout_ms, timeout_ms};
+            in_timerq_.insert(ev);
+            timer_entry entry{ev, timeout_ms, timeout_ms};
 
             if (timerq_.empty()) {
-                timerq_.push_back(std::move(new_expiry));
-                dump("add", fd);
+                timerq_.push_back(std::move(entry));
+                dump(__func__, ev);
                 return;
             }
 
@@ -126,24 +117,24 @@ class engine
                 it->delta_ms -= timeout_ms;
             } else {
                 do {
-                    new_expiry.delta_ms = std::max(new_expiry.delta_ms - it->delta_ms, 1L);
-                } while (++it != timerq_.end() && new_expiry.delta_ms >= it->delta_ms);
+                    entry.delta_ms = std::max(entry.delta_ms - it->delta_ms, 1L);
+                } while (++it != timerq_.end() && entry.delta_ms >= it->delta_ms);
             }
 
-            timerq_.insert(it, std::move(new_expiry));
-            dump("add", fd);
+            timerq_.insert(it, std::move(entry));
+            dump(__func__, ev);
         }
 
-        void remove(int fd)
+        void remove(event* ev)
         {
             update();
 
-            if (timerq_.empty() || !contains(fd)) {
+            if (timerq_.empty() || !contains(ev)) {
                 return;
             }
 
             auto it = timerq_.begin();
-            if (it->fd == fd) {
+            if (it->ev == ev) {
                 // remove head, jt becomes head
                 auto jt = std::next(it);
                 if (jt != timerq_.end()) {
@@ -152,7 +143,7 @@ class engine
                 timerq_.erase(it);
             } else {
                 while (++it != timerq_.end()) {
-                    if (it->fd == fd) {
+                    if (it->ev == ev) {
                         auto jt = std::next(it);
                         if (jt != timerq_.end()) {
                             jt->delta_ms += it->delta_ms;
@@ -163,11 +154,11 @@ class engine
                 }
             }
 
-            in_timerq_.erase(fd);
-            dump("remove", fd);
+            in_timerq_.erase(ev);
+            dump(__func__, ev);
         }
 
-        int expired()
+        event* expired()
         {
             update();
 
@@ -175,17 +166,16 @@ class engine
 
             auto expired = std::move(timerq_.front());
             timerq_.pop_front();
-            int fd = expired.fd;
-            in_timerq_.erase(fd);
+            in_timerq_.erase(expired.ev);
 
-            dump("expired", fd);
+            dump(__func__, expired.ev);
 
-            return fd;
+            return expired.ev;
         }
 
       private:
-        std::list<timer_expiry> timerq_;
-        std::unordered_set<int> in_timerq_;
+        std::list<timer_entry> timerq_;
+        std::unordered_set<event*> in_timerq_;
         std::chrono::steady_clock::time_point last_updated_;
 
         std::chrono::steady_clock::time_point now_sv_;
@@ -205,20 +195,20 @@ class engine
             last_updated_ = now_sv_;
         }
 
-        bool contains(int fd) const noexcept
+        bool contains(event* ev) const noexcept
         {
-            return in_timerq_.find(fd) != in_timerq_.end();
+            return in_timerq_.find(ev) != in_timerq_.end();
         }
 
-        void dump(const char* func, int fd)
+        void dump(const char* func, event* ev)
         {
             (void)func;
-            (void)fd;
+            (void)ev;
 #if 1
-            printf(" *** %s(%d): {", func, fd);
+            printf(" *** %s(%d): {", func, ev->handle());
             int i = 0;
             for (const auto& te : timerq_) {
-                printf(" [%d] = { fd = %d, delta_ms = %ld },", i++, te.fd, te.delta_ms);
+                printf(" [%d] = { fd = %d, delta_ms = %ld },", i++, te.ev->handle(), te.delta_ms);
             }
             printf(" }\n");
 #endif
@@ -240,10 +230,10 @@ class engine
 
     int epollfd_ = -1;
     int eventfd_ = -1;
+    int nevents_ = 0;
 
     std::mutex mtx_;
     std::deque<event_request> requestq_;
-    // std::unordered_map<int, void*> fd_events_;
     timer_list timerq_;
 
   public:
@@ -292,29 +282,23 @@ class engine
 
     void run_next()
     {
-        //auto nwatch = fd_events_.size();
-        auto nwatch = 1024;  // XXX
-        struct epoll_event eev[nwatch];
-        ::memset(eev, 0, sizeof(struct epoll_event) * nwatch);
-        int nfds = ::epoll_wait(epollfd_, eev, nwatch, timerq_.next_expiry());
+        struct epoll_event eev[nevents_];
+        ::memset(eev, 0, sizeof(struct epoll_event) * nevents_);
+        int nfds = ::epoll_wait(epollfd_, eev, nevents_, timerq_.next_expiry());
         if (nfds < 0) {
             throw std::system_error(errno, std::generic_category());
         }
 
         if (nfds == 0) {
-            int source = timerq_.expired();
-            handle_event(source, true);
+            handle_event(timerq_.expired(), true);
             return;
         }
 
         assert(nfds >= 1);
         for (auto i = 0; i < nfds; ++i) {
-            //int source = eev[i].data.fd;
-            //if (source == eventfd_) {
             if (eev[i].data.ptr == this) {
                 handle_request();
             } else {
-                //handle_event(source, false);
                 handle_event(eev[i].data.ptr, false);
             }
         }
@@ -346,7 +330,7 @@ class engine
         if (req.op == EV_ADD) {
             add_event(req.ev->handle(), req.ev, req.timeout_ms);
         } else if (req.op == EV_DEL) {
-            delete_event(req.ev->handle());
+            delete_event(req.ev->handle(), req.ev);
         } else {
             // ignore
         }
@@ -357,11 +341,9 @@ class engine
         struct epoll_event eev;
         ::memset(&eev, 0, sizeof(eev));
         eev.events = EPOLLIN | EPOLLRDHUP | EPOLLPRI | (oneshot ? EPOLLONESHOT : 0U);
-        //eev.data.fd = fd;
-        //int op = (fd_events_.find(fd) == fd_events_.end()) ? EPOLL_CTL_ADD : EPOLL_CTL_MOD;
         eev.data.ptr = ev;
         int op = EPOLL_CTL_ADD;
-again:
+    again:
         int ret = ::epoll_ctl(epollfd_, op, fd, &eev);
         if (ret < 0) {
             if (errno == EEXIST) {
@@ -371,32 +353,34 @@ again:
             throw std::system_error(errno, std::generic_category());
         }
 
-        timerq_.add(fd, timeout_ms);
-        // fd_events_.emplace(fd, ev);
+        timerq_.add((event*)ev, timeout_ms);
+        if (op == EPOLL_CTL_ADD) {
+            ++nevents_;
+        }
     }
 
-    void delete_event(int fd)
+    void delete_event(int fd, void* ev)
     {
         int ret = ::epoll_ctl(epollfd_, EPOLL_CTL_DEL, fd, nullptr);
         if (ret < 0) {
             throw std::system_error(errno, std::generic_category());
         }
 
-        timerq_.remove(fd);
-        // fd_events_.erase(fd);
+        timerq_.remove((event*)ev);
+        --nevents_;
     }
 
     /**
      * event / timer callback
      */
-    void handle_event(int fd, bool timedout = false)
+    void handle_event(void* ptr, bool timedout = false)
     {
+        auto* ev = (event*)ptr;
+
         if (!timedout) {
-            timerq_.remove(fd);
+            timerq_.remove(ev);
         }
 
-        //auto* ev = (event*)fd_events_.at(fd);
-        auto* ev = (event*)fd_events_.at(fd);
         ev->top_half(ev->handle(), timedout);
         exec_bh(ev, timedout);
     }
