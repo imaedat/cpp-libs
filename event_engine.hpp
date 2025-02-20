@@ -107,7 +107,6 @@ class engine
     };
 
     int epollfd_ = -1;
-    // int timerfd_ = -1;
     int eventfd_ = -1;
 
     std::mutex mtx_;
@@ -125,17 +124,11 @@ class engine
             throw std::system_error(errno, std::generic_category());
         }
 
-        // timerfd_ = ::timerfd_create(CLOCK_MONOTONIC, 0);
-        // if (timerfd_ < 0) {
-        //     throw std::system_error(errno, std::generic_category());
-        // }
-
         eventfd_ = ::eventfd(0, EFD_SEMAPHORE);
         if (eventfd_ < 0) {
             throw std::system_error(errno, std::generic_category());
         }
 
-        // add_event(timerfd_, this, 0, false);
         add_event(eventfd_, this, 0, false);
         in_timerq_.reset();
     }
@@ -144,7 +137,6 @@ class engine
     {
         detail::close(epollfd_);
         detail::close(eventfd_);
-        // detail::close(timerfd_);
     }
 
     void register_event(event *ev, long timeout_ms = 0)
@@ -174,29 +166,21 @@ class engine
         auto nwatch = fd_events_.size();
         struct epoll_event eev[nwatch];
         ::memset(eev, 0, sizeof(struct epoll_event) * nwatch);
-#if 0
-        int nfds = ::epoll_wait(epollfd_, eev, nwatch, -1);
-#else
         int wait_ms = timerq_.empty() ? -1 : timerq_.front().delta_ms;
         int nfds = ::epoll_wait(epollfd_, eev, nwatch, wait_ms);
-#endif
         if (nfds < 0) {
             throw std::system_error(errno, std::generic_category());
         }
 
-#if 0
-        assert(nfds != 0);
-#else
         if (nfds == 0) {
             timer_expired();
-        } else
-#endif
+            return;
+        }
 
+        assert(nfds >= 1);
         for (auto i = 0; i < nfds; ++i) {
             int source = eev[i].data.fd;
-            /*if (source == timerfd_) {
-                timer_expired();
-            } else*/ if (source == eventfd_) {
+            if (source == eventfd_) {
                 handle_request();
             } else {
                 handle_event(source, false);
@@ -301,6 +285,8 @@ class engine
 
     void add_timerq(int fd, long timeout_ms)
     {
+        using namespace std::chrono;
+
         if (timeout_ms <= 0) {
             return;
         }
@@ -308,28 +294,21 @@ class engine
         assert(!in_timerq_.test(fd));
 
         in_timerq_.set(fd);
-        // timer_expiry new_expiry{fd, timeout_ms, timeout_ms};
-        // XXX
-        using namespace std::chrono;
         auto now = steady_clock::now();
         timer_expiry new_expiry{fd, timeout_ms, timeout_ms, now};
 
         if (timerq_.empty()) {
             timerq_.push_back(std::move(new_expiry));
-            timer_set(timeout_ms);
             DUMP_TIMERQ(fd);
             return;
         }
 
         auto it = timerq_.begin();
-        // it->delta_ms = timer_left_ms();
-        // XXX
         it->delta_ms -= duration_cast<milliseconds>(now - it->last_updated).count();
         it->last_updated = now;
         if (timeout_ms < it->delta_ms) {
-            // insert to head, and update timer
+            // insert to head
             it->delta_ms -= timeout_ms;
-            timer_set(timeout_ms);
         } else {
             do {
                 new_expiry.delta_ms = std::max(new_expiry.delta_ms - it->delta_ms, 1L);
@@ -344,26 +323,27 @@ class engine
     {
         using namespace std::chrono;
 
-        if (timerq_.empty() || !in_timerq_.test(fd)) {
+        if (timerq_.empty()) {
             return;
         }
 
-        auto now = steady_clock::now();
         auto it = timerq_.begin();
-        // XXX
+        auto now = steady_clock::now();
+        auto elapsed = duration_cast<milliseconds>(now - it->last_updated).count();
+        auto left = it->delta_ms - elapsed;
+        it->delta_ms -= elapsed;
         it->last_updated = now;
+
+        if (!in_timerq_.test(fd)) {
+            return;
+        }
+
         if (it->fd == fd) {
-            // remove head, and update timer
+            // remove head, jt becomes head
             auto jt = std::next(it);
             if (jt != timerq_.end()) {
-                // jt->delta_ms += timer_left_ms();
-                // XXX
-                jt->delta_ms += duration_cast<milliseconds>(now - it->last_updated).count();
+                jt->delta_ms += left;
                 jt->last_updated = now;
-                timer_set(jt->delta_ms);
-            } else {
-                // timer clear
-                timer_set(0);
             }
             timerq_.erase(it);
         } else {
@@ -383,18 +363,9 @@ class engine
         DUMP_TIMERQ(fd);
     }
 
-    //
-    // timer
-    //
     void timer_expired()
     {
         assert(!timerq_.empty());
-
-        // uint64_t counter;
-        // auto nread = ::read(timerfd_, &counter, sizeof(counter));
-        // if (nread < 0) {
-        //     throw std::system_error(errno, std::generic_category());
-        // }
 
         auto expired = std::move(timerq_.front());
         timerq_.pop_front();
@@ -402,47 +373,12 @@ class engine
         in_timerq_.reset(fd);
 
         if (!timerq_.empty()) {
-            timer_set(timerq_.front().delta_ms);
-            // XXX
             timerq_.front().last_updated = std::chrono::steady_clock::now();
         }
 
         handle_event(fd, true);
         DUMP_TIMERQ(fd);
     }
-
-    void timer_set(long) {}
-#if 0
-    void timer_set(long timeout_ms)
-    {
-        static constexpr long ns_scale = 1000 * 1000 * 1000;
-
-        auto nsec = timeout_ms * 1000 * 1000;
-        long sec = 0;
-        if (nsec >= ns_scale) {
-            sec = nsec / ns_scale;
-            nsec %= ns_scale;
-        }
-        // clang-format off
-        struct itimerspec t{{0, 0}, {sec, nsec}};
-        // clang-format on
-        if (::timerfd_settime(timerfd_, 0, &t, nullptr) < 0) {
-            throw std::system_error(errno, std::generic_category());
-        }
-    }
-
-    long timer_left_ms()
-    {
-        // clang-format off
-        struct itimerspec t{{0, 0}, {0, 0}};
-        // clang-format on
-        if (::timerfd_gettime(timerfd_, &t) < 0) {
-            throw std::system_error(errno, std::generic_category());
-        }
-
-        return (t.it_value.tv_sec * 1000) + (t.it_value.tv_nsec / (1000 * 1000));
-    }
-#endif
 };
 
 namespace v1 {
