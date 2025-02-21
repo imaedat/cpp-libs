@@ -111,6 +111,7 @@ class engine
             auto it = event_list_.begin();
             for (; it != event_list_.end(); ++it) {
                 if (new_ev.delta_ms < it->delta_ms) {
+                    it->delta_ms -= new_ev.delta_ms;
                     break;
                 }
                 new_ev.delta_ms = std::max(new_ev.delta_ms - it->delta_ms, 1L);
@@ -180,7 +181,7 @@ class engine
                 printf(" [%d] = { fd = %d, delta_ms = %ld },", i++, te.ev->handle(), te.delta_ms);
                 total += te.delta_ms;
             }
-            printf(" } (total = %ld)\n", total);
+            printf(" } (total [%ld])\n", total);
 #endif
         }
     };
@@ -189,13 +190,14 @@ class engine
     {
         EV_ADD = 1,
         EV_DEL = 2,
+        EV_TIM = 3,
     };
 
     struct event_request
     {
+        enum op op;
         event* ev;
         long timeout_ms;
-        enum op op;
     };
 
     int epollfd_ = -1;
@@ -230,24 +232,17 @@ class engine
 
     void register_event(event* ev, long timeout_ms = 0)
     {
-        static constexpr uint64_t one = 1;
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
-        requestq_.emplace_back(event_request{ev, timeout_ms, EV_ADD});
-        auto nwritten = ::write(eventfd_, &one, sizeof(one));
-        if (nwritten < 0) {
-            throw std::system_error(errno, std::generic_category());
-        }
+        add_requestq(EV_ADD, ev, timeout_ms);
     }
 
-    void deregister_event(event* ev)
+    void register_timer(event* ev, long timeout_ms)
     {
-        static constexpr uint64_t one = 1;
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
-        requestq_.emplace_back(event_request{ev, 0, EV_DEL});
-        auto nwritten = ::write(eventfd_, &one, sizeof(one));
-        if (nwritten < 0) {
-            throw std::system_error(errno, std::generic_category());
-        }
+        add_requestq(EV_TIM, ev, timeout_ms);
+    }
+
+    void deregister(event* ev)
+    {
+        add_requestq(EV_DEL, ev, 0);
     }
 
     void run_next()
@@ -285,6 +280,17 @@ class engine
     /**
      * add new / delete existing event
      */
+    void add_requestq(enum op op, event* ev, long timeout_ms)
+    {
+        static constexpr uint64_t one = 1;
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        requestq_.emplace_back(event_request{op, ev, timeout_ms});
+        auto nwritten = ::write(eventfd_, &one, sizeof(one));
+        if (nwritten < 0) {
+            throw std::system_error(errno, std::generic_category());
+        }
+    }
+
     void handle_request()
     {
         std::unique_lock<decltype(mtx_)> lk(mtx_);
@@ -301,6 +307,8 @@ class engine
             add_event(req.ev->handle(), req.ev, req.timeout_ms);
         } else if (req.op == EV_DEL) {
             delete_event(req.ev->handle(), req.ev);
+        } else if (req.op == EV_TIM) {
+            timerq_.add(req.ev, req.timeout_ms);
         } else {
             // ignore
         }
@@ -331,13 +339,18 @@ class engine
 
     void delete_event(int fd, void* ev)
     {
+        bool enoent = false;
         int ret = ::epoll_ctl(epollfd_, EPOLL_CTL_DEL, fd, nullptr);
         if (ret < 0) {
-            throw std::system_error(errno, std::generic_category());
+            if (!(enoent = (errno == ENOENT))) {
+                throw std::system_error(errno, std::generic_category());
+            }
         }
 
         timerq_.remove((event*)ev);
-        --nevents_;
+        if (!enoent) {
+            --nevents_;
+        }
     }
 
     /**

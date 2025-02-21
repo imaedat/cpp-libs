@@ -2,13 +2,12 @@
 
 #include <signal.h>
 #include <stdio.h>
-#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
-#include <sys/timerfd.h>
 #include <unistd.h>
 
 #include <chrono>
+#include <vector>
 
 #include "signalfd.hpp"
 #include "thread_pool.hpp"
@@ -35,42 +34,6 @@ inline char* now()
 
 #define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), gettid(), ##__VA_ARGS__)
 
-#if 0
-struct timer_event : public event
-{
-    timer_event(engine& eng)
-        : event(eng)
-    {
-        fd_ = timerfd_create(CLOCK_MONOTONIC, 0);
-        reset_timer();
-        engine_->register_event(fd_, this);
-    }
-
-    void top_half(int) override
-    {
-        int64_t count;
-        read(fd_, &count, sizeof(count));
-        engine_->deregister_event(fd_);
-        printf("%05ld (timer  top): timer expired\n", gettid());
-    }
-
-    void bottom_half(int) override
-    {
-        printf("%05ld (timer  bot): set new timer\n", gettid());
-        reset_timer();
-        engine_->register_event(fd_, this);
-    }
-
-    void reset_timer()
-    {
-        // clang-format off
-        struct itimerspec t{{0, 0}, {1, 0}};
-        // clang-format on
-        timerfd_settime(fd_, 0, &t, nullptr);
-    }
-};
-#endif
-
 struct signal_event : public event
 {
     tbd::signalfd sigfd_;
@@ -88,7 +51,7 @@ struct signal_event : public event
     void top_half(int, bool) override
     {
         last_sig_ = sigfd_.get_last_signal();
-        engine_->deregister_event(this);
+        engine_->deregister(this);
 
         if (last_sig_ == SIGQUIT) {
             LOG("(signal top): receive signal: %s, exit\n", strsignal(last_sig_));
@@ -108,6 +71,10 @@ struct socket_event : public event
     int peer_fd_;
     char msgbuf_[1024];
     engine* engine_;
+    steady_clock::time_point timer_start_;
+    bool recv_waiting_ = true;
+
+    inline static constexpr long timeout_ms = 2000;
 
     socket_event(engine& eng)
         : engine_(&eng)
@@ -117,8 +84,12 @@ struct socket_event : public event
         fd_ = fds[0];
         peer_fd_ = fds[1];
 
-        engine_->register_event(this, 1000);
+        engine_->register_event(this, timeout_ms);
+        timer_start_ = steady_clock::now();
     }
+
+    socket_event(const socket_event&) = delete;
+    socket_event(socket_event&&) = default;
 
     ~socket_event()
     {
@@ -136,17 +107,28 @@ struct socket_event : public event
 
     void bottom_half(int, bool timedout) override
     {
+        auto elapsed = duration_cast<milliseconds>(steady_clock::now() - timer_start_).count();
+        long wait_ms = timeout_ms;
         if (timedout) {
-            LOG("(socket bot): fd=%d, timed out!\n", fd_);
+            if (recv_waiting_) {
+                LOG("(socket bot): fd=%d, --- TIMED OUT! --- (elapsed [%lu])\n", fd_, elapsed);
+            } else {
+                LOG("(socket bot): fd=%d, work done (elapsed [%lu])\n", fd_, elapsed);
+                recv_waiting_ = true;
+            }
         } else {
-            auto ms = random() % 1000;
-            LOG("(socket bot): fd=%d, work for %ld ms ...\n", fd_, ms);
-            usleep(ms * 1000);
-            LOG("(socket bot): fd=%d, work done\n", fd_);
+            wait_ms = random() % 1000;
+            LOG("(socket bot): fd=%d, work for %ld ms ...\n", fd_, wait_ms);
+            recv_waiting_ = false;
         }
 
         if (fd_ >= 0) {
-            engine_->register_event(this, 1000);
+            if (timedout) {
+                engine_->register_event(this, wait_ms);
+            } else {
+                engine_->register_timer(this, wait_ms);
+            }
+            timer_start_ = steady_clock::now();
         }
     }
 
@@ -179,17 +161,24 @@ int main()
     // engine eng;
     multithreaded_engine eng;
 
-    // timer_event timer(eng);
     signal_event sigev(eng);
-    socket_event sock(eng);
-    socket_event sock2(eng);
-    socket_event sock3(eng);
-    socket_event sock4(eng);
+    static constexpr size_t nsocks = 9;
+    std::vector<socket_event> socks;
+    socks.reserve(nsocks);
+    for (size_t i = 0; i < nsocks; ++i) {
+        socks.emplace_back(eng);
+    }
+    static constexpr const char* msg[] = {
+        "AAAAAAAA", "BBBBBBBB", "CCCCCCCC", "DDDDDDDD", "EEEEEEEE", "FFFFFFFF", "GGGGGGGG",
+        "HHHHHHHH", "IIIIIIII", "JJJJJJJJ", "KKKKKKKK", "LLLLLLLL", "MMMMMMMM", "NNNNNNNN",
+        "OOOOOOOO", "PPPPPPPP", "QQQQQQQQ", "RRRRRRRR", "SSSSSSSS", "TTTTTTTT", "UUUUUUUU",
+        "VVVVVVVV", "WWWWWWWW", "XXXXXXXX", "YYYYYYYY", "ZZZZZZZZ",
+    };
 
     thread_pool pool(2);
 
     pool.submit([] {
-        for (auto i = 0; i < 10; ++i) {
+        for (auto i = 0; i < 49; ++i) {
             usleep((1000 + random() % 5000) * 1000);
             kill(getpid(), SIGHUP);
         }
@@ -201,17 +190,9 @@ int main()
     bool running = true;
     pool.submit([&] {
         while (running) {
-            usleep((random() % 1000) * 1000);
-            auto target = random() % 4;
-            if (target == 0) {
-                sock.send("Hello!");
-            } else if (target == 1) {
-                sock2.send("World!");
-            } else if (target == 2) {
-                sock3.send("Foobar!");
-            } else {
-                sock4.send("Hoge-Piyo!");
-            }
+            usleep((1 + random() % 999) * 1000);
+            auto i = random() % nsocks;
+            socks[i].send(msg[i]);
         }
     });
 
