@@ -7,7 +7,6 @@
 #include <unistd.h>
 // XXX
 #include <stdio.h>
-#include <sys/syscall.h>
 
 #include <chrono>
 #include <cstring>
@@ -17,19 +16,9 @@
 #include <system_error>
 #include <unordered_set>
 
-namespace tbd {
-
-namespace detail {
-void close(int& fd)
-{
-    if (fd >= 0) {
-        ::close(fd);
-        fd = -1;
-    }
-}
-}  // namespace detail
-
 #if 1  // XXX
+#include <sys/syscall.h>
+
 inline char* now()
 {
     using namespace std::chrono;
@@ -48,6 +37,18 @@ inline char* now()
 
 #define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
 #endif
+
+namespace tbd {
+
+namespace detail {
+void close(int& fd)
+{
+    if (fd >= 0) {
+        ::close(fd);
+        fd = -1;
+    }
+}
+}  // namespace detail
 
 class event
 {
@@ -82,12 +83,12 @@ class event
         return oneshot_;
     }
 
-    virtual void top_half(int, bool)
+    virtual void top_half(bool)
     {
         // urgent work
     }
 
-    virtual void bottom_half(int, bool)
+    virtual void bottom_half(bool)
     {
         // non-urgent, follow-up work
     }
@@ -213,7 +214,7 @@ class engine
         {
             (void)func;
             (void)ev;
-#if 0
+#if 1
             bool omit = true;
             printf(" *** %s(%d): {", func, ev->handle());
             int i = 0;
@@ -415,18 +416,22 @@ class engine
     void handle_event(void* ptr, bool timedout = false)
     {
         auto* ev = (event*)ptr;
-        if (ev->oneshot()) {
+#if 1
+        if (timedout && ev->oneshot()) {
             delete_event(ev->handle(), ev);
         } else {
             timerq_.remove(ev);
         }
-        ev->top_half(ev->handle(), timedout);
+#else
+        timerq_.remove(ev);
+#endif
+        ev->top_half(timedout);
         exec_bh(ev, timedout);
     }
 
     virtual void exec_bh(event* ev, bool timedout)
     {
-        ev->bottom_half(ev->handle(), timedout);
+        ev->bottom_half(timedout);
     }
 };
 

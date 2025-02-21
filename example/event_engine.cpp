@@ -16,23 +16,25 @@ using namespace std;
 using namespace std::chrono;
 using namespace tbd;
 
-//#define gettid() syscall(SYS_gettid)
-//
-//inline char* now()
-//{
-//    thread_local char buf[32] = {0};
-//
-//    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
-//    auto sec = count / (1000 * 1000);
-//    auto usec = count % (1000 * 1000);
-//    struct tm tm;
-//    localtime_r(&sec, &tm);
-//    strftime(buf, 21, "%F %T.", &tm);
-//    sprintf(buf + 20, "%06ld", usec);
-//    return buf;
-//}
-//
-//#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), gettid(), ##__VA_ARGS__)
+#if 0
+#define gettid() syscall(SYS_gettid)
+
+inline char* now()
+{
+    thread_local char buf[32] = {0};
+
+    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
+    auto sec = count / (1000 * 1000);
+    auto usec = count % (1000 * 1000);
+    struct tm tm;
+    localtime_r(&sec, &tm);
+    strftime(buf, 21, "%F %T.", &tm);
+    sprintf(buf + 20, "%06ld", usec);
+    return buf;
+}
+
+#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), gettid(), ##__VA_ARGS__)
+#endif
 
 struct signal_event : public event
 {
@@ -49,7 +51,7 @@ struct signal_event : public event
         engine_->register_event(this);
     }
 
-    void top_half(int, bool) override
+    void top_half(bool) override
     {
         last_sig_ = sigfd_.get_last_signal();
         engine_->deregister(this);
@@ -60,7 +62,7 @@ struct signal_event : public event
         }
     }
 
-    void bottom_half(int, bool) override
+    void bottom_half(bool) override
     {
         LOG("(signal bot): receive signal: %s\n", strsignal(last_sig_));
         engine_->register_event(this);
@@ -76,6 +78,7 @@ struct socket_event : public event
     bool recv_waiting_ = true;
 
     inline static constexpr long timeout_ms = 5000;
+    // inline static constexpr long timeout_ms = 10;
 
     socket_event(engine& eng)
         : engine_(&eng)
@@ -97,9 +100,12 @@ struct socket_event : public event
         close(peer_fd_);
     }
 
-    void top_half(int, bool timedout) override
+    void top_half(bool timedout) override
     {
         if (timedout) {
+#if 0
+            engine_->deregister(this);
+#endif
             LOG("(socket top): fd=%d, --- timed out! ---\n", fd_);
         } else {
             auto nread = read(fd_, msgbuf_, sizeof(msgbuf_));
@@ -108,7 +114,7 @@ struct socket_event : public event
         }
     }
 
-    void bottom_half(int, bool timedout) override
+    void bottom_half(bool timedout) override
     {
         auto elapsed = duration_cast<milliseconds>(steady_clock::now() - timer_start_).count();
         long wait_ms = timeout_ms;
@@ -121,6 +127,7 @@ struct socket_event : public event
             }
         } else {
             wait_ms = random() % 1000;
+            // wait_ms = 10;
             LOG("(socket bot): fd=%d, work for %ld ms ...\n", fd_, wait_ms);
             recv_waiting_ = false;
         }
@@ -147,11 +154,12 @@ struct multithreaded_engine : public engine
 
     void exec_bh(event* ev, bool timedout) override
     {
-        pool_.submit([ev, timedout] { ev->bottom_half(ev->handle(), timedout); });
+        pool_.submit([ev, timedout] { ev->bottom_half(timedout); });
     }
 };
 
 #define NSOCKS 100
+// #define NSOCKS 2
 #define MAXWAIT 100
 #define NSIGHUPS 1000
 
@@ -198,8 +206,9 @@ int main()
     pool.submit([&] {
         while (running) {
             usleep((1 + random() % (MAXWAIT - 1)) * 1000);
+            // usleep(10 * 1000);
             unsigned i = random() % NSOCKS;
-            socks[i].send(msg[(i < nmsgs) ? i : nmsgs - 1]);
+            socks[i].send(msg[i % nmsgs]);
         }
     });
 
