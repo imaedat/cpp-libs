@@ -7,6 +7,7 @@
 #include <unistd.h>
 // XXX
 #include <stdio.h>
+#include <sys/syscall.h>
 
 #include <chrono>
 #include <cstring>
@@ -27,6 +28,26 @@ void close(int& fd)
     }
 }
 }  // namespace detail
+
+#if 1  // XXX
+inline char* now()
+{
+    using namespace std::chrono;
+
+    thread_local char buf[32] = {0};
+
+    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
+    auto sec = count / (1000 * 1000);
+    auto usec = count % (1000 * 1000);
+    struct tm tm;
+    localtime_r(&sec, &tm);
+    strftime(buf, 21, "%F %T.", &tm);
+    sprintf(buf + 20, "%06ld", usec);
+    return buf;
+}
+
+#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
+#endif
 
 class event
 {
@@ -56,6 +77,11 @@ class event
         return fd_;
     }
 
+    bool oneshot() const noexcept
+    {
+        return oneshot_;
+    }
+
     virtual void top_half(int, bool)
     {
         // urgent work
@@ -68,6 +94,7 @@ class event
 
   protected:
     int fd_ = -1;
+    bool oneshot_ = true;
 
     event() = default;
 };
@@ -141,6 +168,7 @@ class engine
                 }
             } while (++it != event_list_.end());
 
+            assert(it != event_list_.end());
             event_list_.erase(it);
             event_set_.erase(ev);
             dump(__func__, ev);
@@ -159,8 +187,20 @@ class engine
             last_updated_ = now;
 
             if (!event_list_.empty()) {
-                assert(event_list_.front().delta_ms - elapsed >= -1);  // ???
+                auto over_elapsed = elapsed - event_list_.front().delta_ms;
                 event_list_.front().delta_ms = std::max(event_list_.front().delta_ms - elapsed, 0L);
+
+                auto it = event_list_.begin();
+                while (over_elapsed > 0 && ++it != event_list_.end()) {
+                    auto over_elapsed_left = it->delta_ms - over_elapsed;
+                    if (over_elapsed_left >= 0) {
+                        it->delta_ms = std::max(it->delta_ms - over_elapsed, 1L);
+                        break;
+                    } else {
+                        it->delta_ms = 1;
+                        over_elapsed = -over_elapsed_left;
+                    }
+                }
             }
         }
 
@@ -173,15 +213,21 @@ class engine
         {
             (void)func;
             (void)ev;
-#if 1
+#if 0
+            bool omit = true;
             printf(" *** %s(%d): {", func, ev->handle());
             int i = 0;
             long total = 0;
             for (const auto& te : event_list_) {
-                printf(" [%d] = { fd = %d, delta_ms = %ld },", i++, te.ev->handle(), te.delta_ms);
+                if (!omit || i < 10) {
+                    printf(" [%d] = { fd = %d, delta_ms = %ld },", i, te.ev->handle(), te.delta_ms);
+                }
                 total += te.delta_ms;
+                ++i;
             }
-            printf(" } (total [%ld])\n", total);
+            auto len = event_list_.size();
+            printf("%s } (len [%lu], total [%ld])\n", ((omit && len > 10) ? " ..." : ""), len,
+                   total);
 #endif
         }
     };
@@ -303,8 +349,18 @@ class engine
         }
         lk.unlock();
 
+#if 1
+        {
+            // clang-format off
+            static constexpr const char* evop[] = { "DUMMY", "ADD", "DEL", "TIM", };
+            // clang-format on
+            LOG("(engine    ): fd=%d, op=%s, timeout=%ld\n", req.ev->handle(), evop[(int)req.op],
+                req.timeout_ms);
+        }
+#endif
+
         if (req.op == EV_ADD) {
-            add_event(req.ev->handle(), req.ev, req.timeout_ms);
+            add_event(req.ev->handle(), req.ev, req.timeout_ms, req.ev->oneshot());
         } else if (req.op == EV_DEL) {
             delete_event(req.ev->handle(), req.ev);
         } else if (req.op == EV_TIM) {
@@ -359,7 +415,11 @@ class engine
     void handle_event(void* ptr, bool timedout = false)
     {
         auto* ev = (event*)ptr;
-        timerq_.remove(ev);
+        if (ev->oneshot()) {
+            delete_event(ev->handle(), ev);
+        } else {
+            timerq_.remove(ev);
+        }
         ev->top_half(ev->handle(), timedout);
         exec_bh(ev, timedout);
     }

@@ -16,23 +16,23 @@ using namespace std;
 using namespace std::chrono;
 using namespace tbd;
 
-#define gettid() syscall(SYS_gettid)
-
-inline char* now()
-{
-    thread_local char buf[32] = {0};
-
-    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
-    auto sec = count / (1000 * 1000);
-    auto usec = count % (1000 * 1000);
-    struct tm tm;
-    localtime_r(&sec, &tm);
-    strftime(buf, 21, "%F %T.", &tm);
-    sprintf(buf + 20, "%06ld", usec);
-    return buf;
-}
-
-#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), gettid(), ##__VA_ARGS__)
+//#define gettid() syscall(SYS_gettid)
+//
+//inline char* now()
+//{
+//    thread_local char buf[32] = {0};
+//
+//    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
+//    auto sec = count / (1000 * 1000);
+//    auto usec = count % (1000 * 1000);
+//    struct tm tm;
+//    localtime_r(&sec, &tm);
+//    strftime(buf, 21, "%F %T.", &tm);
+//    sprintf(buf + 20, "%06ld", usec);
+//    return buf;
+//}
+//
+//#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), gettid(), ##__VA_ARGS__)
 
 struct signal_event : public event
 {
@@ -45,6 +45,7 @@ struct signal_event : public event
         , engine_(&eng)
     {
         fd_ = sigfd_.handle();
+        oneshot_ = false;
         engine_->register_event(this);
     }
 
@@ -74,7 +75,7 @@ struct socket_event : public event
     steady_clock::time_point timer_start_;
     bool recv_waiting_ = true;
 
-    inline static constexpr long timeout_ms = 2000;
+    inline static constexpr long timeout_ms = 5000;
 
     socket_event(engine& eng)
         : engine_(&eng)
@@ -98,7 +99,9 @@ struct socket_event : public event
 
     void top_half(int, bool timedout) override
     {
-        if (!timedout) {
+        if (timedout) {
+            LOG("(socket top): fd=%d, --- timed out! ---\n", fd_);
+        } else {
             auto nread = read(fd_, msgbuf_, sizeof(msgbuf_));
             msgbuf_[nread] = '\0';
             LOG("(socket top): fd=%d, receive message: %s\n", fd_, msgbuf_);
@@ -148,6 +151,10 @@ struct multithreaded_engine : public engine
     }
 };
 
+#define NSOCKS 100
+#define MAXWAIT 100
+#define NSIGHUPS 1000
+
 int main()
 {
     sigset_t mask;
@@ -162,10 +169,9 @@ int main()
     multithreaded_engine eng;
 
     signal_event sigev(eng);
-    static constexpr size_t nsocks = 9;
     std::vector<socket_event> socks;
-    socks.reserve(nsocks);
-    for (size_t i = 0; i < nsocks; ++i) {
+    socks.reserve(NSOCKS);
+    for (size_t i = 0; i < NSOCKS; ++i) {
         socks.emplace_back(eng);
     }
     static constexpr const char* msg[] = {
@@ -174,11 +180,12 @@ int main()
         "OOOOOOOO", "PPPPPPPP", "QQQQQQQQ", "RRRRRRRR", "SSSSSSSS", "TTTTTTTT", "UUUUUUUU",
         "VVVVVVVV", "WWWWWWWW", "XXXXXXXX", "YYYYYYYY", "ZZZZZZZZ",
     };
+    static constexpr size_t nmsgs = sizeof(msg) / sizeof(msg[0]);
 
     thread_pool pool(2);
 
     pool.submit([] {
-        for (auto i = 0; i < 49; ++i) {
+        for (auto i = 0; i < NSIGHUPS; ++i) {
             usleep((1000 + random() % 5000) * 1000);
             kill(getpid(), SIGHUP);
         }
@@ -190,9 +197,9 @@ int main()
     bool running = true;
     pool.submit([&] {
         while (running) {
-            usleep((1 + random() % 999) * 1000);
-            auto i = random() % nsocks;
-            socks[i].send(msg[i]);
+            usleep((1 + random() % (MAXWAIT - 1)) * 1000);
+            unsigned i = random() % NSOCKS;
+            socks[i].send(msg[(i < nmsgs) ? i : nmsgs - 1]);
         }
     });
 
