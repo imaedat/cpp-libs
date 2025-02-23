@@ -81,7 +81,7 @@ IncludeIsMainRegex: '(Test)?$'
 IncludeIsMainSourceRegex: ''
 IndentCaseLabels: false #true
 IndentGotoLabels: true
-IndentPPDirectives: None
+IndentPPDirectives: AfterHash #None
 IndentWidth:     4 #2
 IndentWrappedFunctionNames: false
 JavaScriptQuotes: Leave
