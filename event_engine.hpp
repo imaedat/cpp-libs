@@ -5,8 +5,10 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
-// XXX
-#include <stdio.h>
+#ifdef EVENT_ENGINE_VERBOSE
+#    include <stdio.h>
+#    include <sys/syscall.h>
+#endif
 
 #include <chrono>
 #include <cstring>
@@ -16,32 +18,10 @@
 #include <system_error>
 #include <unordered_set>
 
-#if 1  // XXX
-#include <sys/syscall.h>
-
-inline char* now()
-{
-    using namespace std::chrono;
-
-    thread_local char buf[32] = {0};
-
-    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
-    auto sec = count / (1000 * 1000);
-    auto usec = count % (1000 * 1000);
-    struct tm tm;
-    localtime_r(&sec, &tm);
-    strftime(buf, 21, "%F %T.", &tm);
-    sprintf(buf + 20, "%06ld", usec);
-    return buf;
-}
-
-#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
-#endif
-
 namespace tbd {
 
 namespace detail {
-void close(int& fd)
+inline void close(int& fd)
 {
     if (fd >= 0) {
         ::close(fd);
@@ -83,6 +63,11 @@ class event
         return oneshot_;
     }
 
+    void set_oneshot(bool set = true) noexcept
+    {
+        oneshot_ = set;
+    }
+
     virtual void top_half(bool)
     {
         // urgent work
@@ -95,9 +80,12 @@ class event
 
   protected:
     int fd_ = -1;
-    bool oneshot_ = true;
+    bool oneshot_ = false;
 
-    event() = default;
+    event() noexcept = default;
+    explicit event(bool oneshot) noexcept
+        : oneshot_(oneshot)
+    {}
 };
 
 class engine
@@ -106,25 +94,18 @@ class engine
     struct timer_event
     {
         event* ev;
-        long timeout_ms;
-        long delta_ms;
+        int delta_ms;
     };
 
     class timer_list
     {
       public:
-        long next_expiry() const noexcept
+        int next_expiry()
         {
             return (!event_list_.empty()) ? event_list_.front().delta_ms : -1;
         }
 
-        event* head() const
-        {
-            assert(!event_list_.empty());
-            return event_list_.front().ev;
-        }
-
-        void add(event* ev, long timeout_ms)
+        void add(event* ev, int timeout_ms)
         {
             update();
 
@@ -134,7 +115,7 @@ class engine
 
             assert(!contains(ev));
 
-            timer_event new_ev{ev, timeout_ms, timeout_ms};
+            timer_event new_ev{ev, timeout_ms};
 
             auto it = event_list_.begin();
             for (; it != event_list_.end(); ++it) {
@@ -142,7 +123,7 @@ class engine
                     it->delta_ms -= new_ev.delta_ms;
                     break;
                 }
-                new_ev.delta_ms = std::max(new_ev.delta_ms - it->delta_ms, 1L);
+                new_ev.delta_ms = std::max(new_ev.delta_ms - it->delta_ms, 1);
             }
 
             event_list_.insert(it, std::move(new_ev));
@@ -151,6 +132,26 @@ class engine
         }
 
         void remove(event* ev)
+        {
+            remove_(ev);
+            dump(__func__, ev);
+        }
+
+        event* pop()
+        {
+            assert(!event_list_.empty());
+            auto* ev = event_list_.front().ev;
+            remove_(ev);
+            dump(__func__, ev);
+            return ev;
+        }
+
+      private:
+        std::list<timer_event> event_list_;
+        std::unordered_set<event*> event_set_;
+        std::chrono::steady_clock::time_point last_updated_;
+
+        void remove_(event* ev) noexcept
         {
             update();
 
@@ -172,13 +173,7 @@ class engine
             assert(it != event_list_.end());
             event_list_.erase(it);
             event_set_.erase(ev);
-            dump(__func__, ev);
         }
-
-      private:
-        std::list<timer_event> event_list_;
-        std::unordered_set<event*> event_set_;
-        std::chrono::steady_clock::time_point last_updated_;
 
         void update() noexcept
         {
@@ -197,10 +192,10 @@ class engine
                     if (over_elapsed_left >= 0) {
                         it->delta_ms = std::max(it->delta_ms - over_elapsed, 1L);
                         break;
-                    } else {
-                        it->delta_ms = 1;
-                        over_elapsed = -over_elapsed_left;
                     }
+
+                    it->delta_ms = 1;
+                    over_elapsed = -over_elapsed_left;
                 }
             }
         }
@@ -210,13 +205,13 @@ class engine
             return event_set_.find(ev) != event_set_.end();
         }
 
-        void dump(const char* func, event* ev)
+        void dump(const char* func, event* ev) const noexcept
         {
             (void)func;
             (void)ev;
-#if 1
+#ifdef EVENT_ENGINE_VERBOSE
             bool omit = true;
-            printf(" *** %s(%d): {", func, ev->handle());
+            printf(" *** [%ld] %s(%d): {", syscall(SYS_gettid), func, ev->handle());
             int i = 0;
             long total = 0;
             for (const auto& te : event_list_) {
@@ -231,7 +226,7 @@ class engine
                    total);
 #endif
         }
-    };
+    };  // timer_list
 
     enum op
     {
@@ -244,13 +239,12 @@ class engine
     {
         enum op op;
         event* ev;
-        long timeout_ms;
+        int timeout_ms;
     };
 
     int epollfd_ = -1;
     int eventfd_ = -1;
-    int nevents_ = 0;
-
+    size_t nevents_ = 0;
     std::mutex mtx_;
     std::deque<event_request> requestq_;
     timer_list timerq_;
@@ -277,12 +271,12 @@ class engine
         detail::close(eventfd_);
     }
 
-    void register_event(event* ev, long timeout_ms = 0)
+    void register_event(event* ev, int timeout_ms = 0)
     {
         add_requestq(EV_ADD, ev, timeout_ms);
     }
 
-    void register_timer(event* ev, long timeout_ms)
+    void register_timer(event* ev, int timeout_ms)
     {
         add_requestq(EV_TIM, ev, timeout_ms);
     }
@@ -302,7 +296,7 @@ class engine
         }
 
         if (nfds == 0) {
-            handle_event(timerq_.head(), true);
+            handle_timeout();
             return;
         }
 
@@ -311,7 +305,7 @@ class engine
             if (eev[i].data.ptr == this) {
                 handle_request();
             } else {
-                handle_event(eev[i].data.ptr, false);
+                handle_event(eev[i].data.ptr);
             }
         }
     }
@@ -327,7 +321,7 @@ class engine
     /**
      * add new / delete existing event
      */
-    void add_requestq(enum op op, event* ev, long timeout_ms)
+    void add_requestq(enum op op, event* ev, int timeout_ms)
     {
         static constexpr uint64_t one = 1;
         std::lock_guard<decltype(mtx_)> lk(mtx_);
@@ -348,17 +342,6 @@ class engine
         if (nread < 0) {
             throw std::system_error(errno, std::generic_category());
         }
-        lk.unlock();
-
-#if 1
-        {
-            // clang-format off
-            static constexpr const char* evop[] = { "DUMMY", "ADD", "DEL", "TIM", };
-            // clang-format on
-            LOG("(engine    ): fd=%d, op=%s, timeout=%ld\n", req.ev->handle(), evop[(int)req.op],
-                req.timeout_ms);
-        }
-#endif
 
         if (req.op == EV_ADD) {
             add_event(req.ev->handle(), req.ev, req.timeout_ms, req.ev->oneshot());
@@ -371,7 +354,7 @@ class engine
         }
     }
 
-    void add_event(int fd, void* ev, long timeout_ms, bool oneshot = true)
+    void add_event(int fd, void* ev, int timeout_ms = 0, bool oneshot = true)
     {
         struct epoll_event eev;
         ::memset(&eev, 0, sizeof(eev));
@@ -413,20 +396,27 @@ class engine
     /**
      * event / timer callback
      */
-    void handle_event(void* ptr, bool timedout = false)
+    void handle_timeout()
+    {
+        auto* ev = timerq_.pop();
+        if (ev->oneshot()) {
+            delete_event(ev->handle(), ev);
+        }
+        ev->top_half(true);
+        exec_bh(ev, true);
+    }
+
+    void handle_event(void* ptr)
     {
         auto* ev = (event*)ptr;
-#if 1
-        if (timedout && ev->oneshot()) {
+        if (ev->oneshot()) {
             delete_event(ev->handle(), ev);
         } else {
             timerq_.remove(ev);
         }
-#else
-        timerq_.remove(ev);
-#endif
-        ev->top_half(timedout);
-        exec_bh(ev, timedout);
+
+        ev->top_half(false);
+        exec_bh(ev, false);
     }
 
     virtual void exec_bh(event* ev, bool timedout)

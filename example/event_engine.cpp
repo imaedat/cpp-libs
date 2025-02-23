@@ -1,5 +1,6 @@
 #include "event_engine.hpp"
 
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <sys/socket.h>
@@ -7,6 +8,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <deque>
 #include <vector>
 
 #include "signalfd.hpp"
@@ -15,9 +17,6 @@
 using namespace std;
 using namespace std::chrono;
 using namespace tbd;
-
-#if 0
-#define gettid() syscall(SYS_gettid)
 
 inline char* now()
 {
@@ -33,8 +32,7 @@ inline char* now()
     return buf;
 }
 
-#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), gettid(), ##__VA_ARGS__)
-#endif
+#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
 
 struct signal_event : public event
 {
@@ -53,10 +51,7 @@ struct signal_event : public event
 
     void top_half(bool) override
     {
-        last_sig_ = sigfd_.get_last_signal();
-        engine_->deregister(this);
-
-        if (last_sig_ == SIGQUIT) {
+        if ((last_sig_ = sigfd_.get_last_signal()) == SIGQUIT) {
             LOG("(signal top): receive signal: %s, exit\n", strsignal(last_sig_));
             throw 1;
         }
@@ -65,31 +60,49 @@ struct signal_event : public event
     void bottom_half(bool) override
     {
         LOG("(signal bot): receive signal: %s\n", strsignal(last_sig_));
-        engine_->register_event(this);
     }
 };
 
+#undef PROVOKE_COLLISIONS
+
+#ifdef PROVOKE_COLLISIONS
+#    define TIMEOUT_MS 10
+#    define WAIT_MS 10
+#else
+#    define TIMEOUT_MS 5000
+#    define WAIT_MS (1 + random() % 999)
+#endif
+
 struct socket_event : public event
 {
+    enum state
+    {
+        IN_WAITING = 1,
+        IN_WORKNG = 2,
+    };
+
     int peer_fd_;
     char msgbuf_[1024];
     engine* engine_;
     steady_clock::time_point timer_start_;
-    bool recv_waiting_ = true;
+    state state_, next_state_;
 
-    inline static constexpr long timeout_ms = 5000;
-    // inline static constexpr long timeout_ms = 10;
+    unique_ptr<mutex> mtx_;
+    deque<pair<long, string>> trace_;
 
     socket_event(engine& eng)
         : engine_(&eng)
+        , mtx_(make_unique<typename std::decay<decltype(*mtx_)>::type>())
     {
         int fds[2];
         socketpair(AF_UNIX, SOCK_DGRAM, 0, fds);
         fd_ = fds[0];
         peer_fd_ = fds[1];
+        oneshot_ = true;
 
-        engine_->register_event(this, timeout_ms);
+        engine_->register_event(this, TIMEOUT_MS);
         timer_start_ = steady_clock::now();
+        state_ = IN_WAITING;
     }
 
     socket_event(const socket_event&) = delete;
@@ -100,50 +113,117 @@ struct socket_event : public event
         close(peer_fd_);
     }
 
+    void trace(string_view point)
+    {
+        (void)point;
+#if 1
+        trace_.emplace_back(make_pair(syscall(SYS_gettid), point));
+        if (trace_.size() > 20) {
+            trace_.pop_front();
+        }
+#endif
+    }
+
     void top_half(bool timedout) override
     {
-        if (timedout) {
-#if 0
-            engine_->deregister(this);
-#endif
-            LOG("(socket top): fd=%d, --- timed out! ---\n", fd_);
-        } else {
-            auto nread = read(fd_, msgbuf_, sizeof(msgbuf_));
-            msgbuf_[nread] = '\0';
-            LOG("(socket top): fd=%d, receive message: %s\n", fd_, msgbuf_);
+        lock_guard<decltype(*mtx_)> lk(*mtx_);
+        trace("TB");
+
+        switch (state_) {
+        case IN_WAITING:
+            if (timedout) {
+                trace("T1");
+                LOG("(socket top): fd=%d, --- timed out! ---\n", fd_);
+            } else {
+                auto nread = read(fd_, msgbuf_, sizeof(msgbuf_));
+                msgbuf_[nread] = '\0';
+                trace("T2");
+                LOG("(socket top): fd=%d, receive message: %s\n", fd_, msgbuf_);
+            }
+            break;
+
+        case IN_WORKNG:
+            // work done
+            assert(timedout);
+            trace("T3");
+            break;
+
+        default:
+            break;
         }
     }
 
     void bottom_half(bool timedout) override
     {
+        lock_guard<decltype(*mtx_)> lk(*mtx_);
         auto elapsed = duration_cast<milliseconds>(steady_clock::now() - timer_start_).count();
-        long wait_ms = timeout_ms;
-        if (timedout) {
-            if (recv_waiting_) {
+        int wait_ms = TIMEOUT_MS;
+
+        switch (state_) {
+        case IN_WAITING:
+            if (timedout) {
+                trace("B1");
                 LOG("(socket bot): fd=%d, --- TIMED OUT! --- (elapsed [%lu])\n", fd_, elapsed);
+                next_state_ = IN_WAITING;
             } else {
-                LOG("(socket bot): fd=%d, work done (elapsed [%lu])\n", fd_, elapsed);
-                recv_waiting_ = true;
+                trace("B2");
+                wait_ms = WAIT_MS;
+                LOG("(socket bot): fd=%d, work for %d ms ...\n", fd_, wait_ms);
+                next_state_ = IN_WORKNG;
             }
-        } else {
-            wait_ms = random() % 1000;
-            // wait_ms = 10;
-            LOG("(socket bot): fd=%d, work for %ld ms ...\n", fd_, wait_ms);
-            recv_waiting_ = false;
+            break;
+
+        case IN_WORKNG:
+            assert(timedout);
+            trace("B3");
+            LOG("(socket bot): fd=%d, work done (elapsed [%lu])\n", fd_, elapsed);
+            next_state_ = IN_WAITING;
+            break;
+
+        default:
+            break;
         }
 
+        register_next(wait_ms);
+        timer_start_ = steady_clock::now();
+        state_ = next_state_;
+        trace("BE");
+    }
+
+    void register_next(int wait_ms)
+    {
         if (fd_ >= 0) {
-            if (timedout) {
+            switch (next_state_) {
+            case IN_WAITING:
                 engine_->register_event(this, wait_ms);
-            } else {
+                break;
+            case IN_WORKNG:
                 engine_->register_timer(this, wait_ms);
+                break;
+            default:
+                break;
             }
-            timer_start_ = steady_clock::now();
         }
     }
 
     void send(string_view msg)
     {
+        struct pollfd pfd;
+        pfd.fd = peer_fd_;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        int nfds = poll(&pfd, 1, 0);
+        if (nfds < 0) {
+            auto errsv = errno;
+            perror("poll");
+            exit(errsv);
+        }
+        if (nfds != 1) {
+            auto elapsed = duration_cast<milliseconds>(steady_clock::now() - timer_start_).count();
+            LOG("(socket bot): fd=%d, TIMER MISSING ... ? (elapsed [%lu])\n", fd_, elapsed);
+            asm volatile("int3");
+        }
+
         write(peer_fd_, msg.data(), msg.size());
     }
 };
@@ -158,10 +238,16 @@ struct multithreaded_engine : public engine
     }
 };
 
-#define NSOCKS 100
-// #define NSOCKS 2
-#define MAXWAIT 100
 #define NSIGHUPS 1000
+#define MAXWAIT_MS 50
+
+#ifdef PROVOKE_COLLISIONS
+#    define NSOCKS 2
+#    define INTERVAL_MS WAIT_MS
+#else
+#    define NSOCKS 200
+#    define INTERVAL_MS (1 + random() % (MAXWAIT_MS - 1))
+#endif
 
 int main()
 {
@@ -169,6 +255,7 @@ int main()
     sigemptyset(&mask);
     sigaddset(&mask, SIGHUP);
     sigaddset(&mask, SIGQUIT);
+    sigaddset(&mask, SIGTSTP);
     pthread_sigmask(SIG_BLOCK, &mask, nullptr);
 
     srandom(time(nullptr));
@@ -205,8 +292,7 @@ int main()
     bool running = true;
     pool.submit([&] {
         while (running) {
-            usleep((1 + random() % (MAXWAIT - 1)) * 1000);
-            // usleep(10 * 1000);
+            usleep(INTERVAL_MS * 1000);
             unsigned i = random() % NSOCKS;
             socks[i].send(msg[i % nmsgs]);
         }
