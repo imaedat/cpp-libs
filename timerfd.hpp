@@ -74,7 +74,9 @@ class timerfd
             sec = nsec / ns_scale;
             nsec %= ns_scale;
         }
+        // clang-format off
         struct itimerspec t{{(cyclic ? sec : 0), (cyclic ? nsec : 0)}, {sec, nsec}};
+        // clang-format on
         if (::timerfd_settime(fd_, 0, &t, nullptr) < 0) {
             throw std::system_error(errno, std::generic_category(),
                     "timerfd::settime: timerfd_settime");
