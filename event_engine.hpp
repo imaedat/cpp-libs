@@ -216,13 +216,13 @@ class engine
             long total = 0;
             for (const auto& te : event_list_) {
                 if (!omit || i < 10) {
-                    printf(" [%d] = { fd = %d, delta_ms = %ld },", i, te.ev->handle(), te.delta_ms);
+                    printf(" [%d] = { fd = %d, delta_ms = %d },", i, te.ev->handle(), te.delta_ms);
                 }
                 total += te.delta_ms;
                 ++i;
             }
             auto len = event_list_.size();
-            printf("%s } (len [%lu], total [%ld])\n", ((omit && len > 10) ? " ..." : ""), len,
+            printf("%s } (len [%lu], total [%ld]) ***\n", ((omit && len > 10) ? " ..." : ""), len,
                    total);
 #endif
         }
