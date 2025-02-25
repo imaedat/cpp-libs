@@ -54,9 +54,14 @@ class signalfd
 
     void set_nonblock(bool set = true)
     {
-        if (::fcntl(fd_, F_SETFL, (set ? O_NONBLOCK : 0)) < 0) {
-            throw std::system_error(errno, std::generic_category());
+        int ret = ::fcntl(fd_, F_GETFL, nullptr);
+        if (ret >= 0) {
+            int flags = set ? (ret | O_NONBLOCK) : (ret & ~O_NONBLOCK);
+            if (::fcntl(fd_, F_SETFL, flags) == 0) {
+                return;
+            }
         }
+        throw std::system_error(errno, std::generic_category());
     }
 
     int get_last_signal() const

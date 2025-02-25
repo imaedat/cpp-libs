@@ -13,15 +13,17 @@ namespace tbd {
 class timerfd
 {
   public:
-    timerfd() : fd_(::timerfd_create(CLOCK_MONOTONIC, 0))
+    timerfd()
+        : fd_(::timerfd_create(CLOCK_MONOTONIC, 0))
     {
         if (fd_ < 0) {
             throw std::system_error(errno, std::generic_category(),
-                    "timerfd::timerfd: timerfd_create");
+                                    "timerfd::timerfd: timerfd_create");
         }
     }
 
-    explicit timerfd(long after_ms) : timerfd()
+    explicit timerfd(long after_ms)
+        : timerfd()
     {
         settime(after_ms);
     }
@@ -56,10 +58,14 @@ class timerfd
 
     void set_nonblock(bool set = true)
     {
-        if (::fcntl(fd_, F_SETFL, (set ? O_NONBLOCK : 0)) < 0) {
-            throw std::system_error(errno, std::generic_category(),
-                    "timerfd::set_nonblock: fcntl");
+        int ret = ::fcntl(fd_, F_GETFL, nullptr);
+        if (ret >= 0) {
+            int flags = set ? (ret | O_NONBLOCK) : (ret & ~O_NONBLOCK);
+            if (::fcntl(fd_, F_SETFL, flags) == 0) {
+                return;
+            }
         }
+        throw std::system_error(errno, std::generic_category(), "timerfd::set_nonblock: fcntl");
     }
 
     void settime(long after_ms, bool cyclic = false)
@@ -79,7 +85,7 @@ class timerfd
         // clang-format on
         if (::timerfd_settime(fd_, 0, &t, nullptr) < 0) {
             throw std::system_error(errno, std::generic_category(),
-                    "timerfd::settime: timerfd_settime");
+                                    "timerfd::settime: timerfd_settime");
         }
     }
 
@@ -87,10 +93,16 @@ class timerfd
     {
         clear();
 
-        struct itimerspec t{{0, 0}, {0, 0}};
+        struct itimerspec t
+        {
+            {0, 0},
+            {
+                0, 0
+            }
+        };
         if (::timerfd_settime(fd_, 0, &t, nullptr) < 0) {
             throw std::system_error(errno, std::generic_category(),
-                    "timerfd::cancel: timerfd_settime");
+                                    "timerfd::cancel: timerfd_settime");
         }
     }
 
