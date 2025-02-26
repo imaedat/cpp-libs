@@ -217,7 +217,7 @@ class engine
         {
             (void)func;
             (void)ev;
-#if defined(EVENT_ENGINE_VERBOSE) && (EVENT_ENGINE_VERBOSE == 2)
+#if defined(EVENT_ENGINE_VERBOSE) && (EVENT_ENGINE_VERBOSE >= 2)
             bool omit = true;
             unsigned max_on_omit = 20;
             std::ostringstream ss;
@@ -367,7 +367,7 @@ class engine
         return changed;
     }
 
-    void add_event(int fd, event* ev, int timeout_ms = 0, bool oneshot = true)
+    void add_event(int fd, event* ev, int timeout_ms = 0, bool oneshot = false)
     {
 #ifdef EVENT_ENGINE_VERBOSE
         printf(" *** add_event: fd=%d, ev=%p, timeout_ms=%d, oneshot=%d ***\n", fd, ev, timeout_ms,
