@@ -85,7 +85,8 @@ class event
     event() noexcept = default;
     explicit event(bool oneshot) noexcept
         : oneshot_(oneshot)
-    {}
+    {
+    }
 };
 
 class engine
@@ -93,7 +94,7 @@ class engine
   protected:
     struct timer_event
     {
-        event* ev;
+        void* ev;
         int delta_ms;
     };
 
@@ -105,7 +106,7 @@ class engine
             return (!event_list_.empty()) ? event_list_.front().delta_ms : -1;
         }
 
-        void add(event* ev, int timeout_ms)
+        void add(void* ev, int timeout_ms)
         {
             update();
 
@@ -131,15 +132,17 @@ class engine
             dump(__func__, ev);
         }
 
-        void remove(event* ev)
+        void remove(void* ev)
         {
+            update();
             remove_(ev);
             dump(__func__, ev);
         }
 
-        event* pop()
+        void* pop()
         {
             assert(!event_list_.empty());
+            update();
             auto* ev = event_list_.front().ev;
             remove_(ev);
             dump(__func__, ev);
@@ -148,13 +151,11 @@ class engine
 
       private:
         std::list<timer_event> event_list_;
-        std::unordered_set<event*> event_set_;
+        std::unordered_set<void*> event_set_;
         std::chrono::steady_clock::time_point last_updated_;
 
-        void remove_(event* ev) noexcept
+        void remove_(void* ev) noexcept
         {
-            update();
-
             if (event_list_.empty() || !contains(ev)) {
                 return;
             }
@@ -184,13 +185,14 @@ class engine
 
             if (!event_list_.empty()) {
                 auto over_elapsed = elapsed - event_list_.front().delta_ms;
-                event_list_.front().delta_ms = std::max(event_list_.front().delta_ms - elapsed, 0L);
+                event_list_.front().delta_ms =
+                    (int)std::max(event_list_.front().delta_ms - elapsed, 0L);
 
                 auto it = event_list_.begin();
                 while (over_elapsed > 0 && ++it != event_list_.end()) {
                     auto over_elapsed_left = it->delta_ms - over_elapsed;
                     if (over_elapsed_left >= 0) {
-                        it->delta_ms = std::max(it->delta_ms - over_elapsed, 1L);
+                        it->delta_ms = (int)std::max(it->delta_ms - over_elapsed, 1L);
                         break;
                     }
 
@@ -200,12 +202,12 @@ class engine
             }
         }
 
-        bool contains(event* ev) const noexcept
+        bool contains(void* ev) const noexcept
         {
             return event_set_.find(ev) != event_set_.end();
         }
 
-        void dump(const char* func, event* ev) const noexcept
+        void dump(const char* func, void* ev) const noexcept
         {
             (void)func;
             (void)ev;
@@ -244,7 +246,7 @@ class engine
 
     int epollfd_ = -1;
     int eventfd_ = -1;
-    size_t nevents_ = 0;
+    int nevents_ = 0;
     std::mutex mtx_;
     std::deque<event_request> requestq_;
     timer_list timerq_;
@@ -371,7 +373,7 @@ class engine
             throw std::system_error(errno, std::generic_category());
         }
 
-        timerq_.add((event*)ev, timeout_ms);
+        timerq_.add(ev, timeout_ms);
         if (op == EPOLL_CTL_ADD) {
             ++nevents_;
         }
@@ -387,7 +389,7 @@ class engine
             }
         }
 
-        timerq_.remove((event*)ev);
+        timerq_.remove(ev);
         if (!enoent) {
             --nevents_;
         }
@@ -398,7 +400,7 @@ class engine
      */
     void handle_timeout()
     {
-        auto* ev = timerq_.pop();
+        auto* ev = (event*)timerq_.pop();
         if (ev->oneshot()) {
             delete_event(ev->handle(), ev);
         }
