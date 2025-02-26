@@ -3,7 +3,6 @@
 
 #include <assert.h>
 #include <sys/epoll.h>
-#include <sys/eventfd.h>
 #include <unistd.h>
 #ifdef EVENT_ENGINE_VERBOSE
 #    include <stdio.h>
@@ -17,6 +16,9 @@
 #include <mutex>
 #include <system_error>
 #include <unordered_set>
+#ifdef EVENT_ENGINE_VERBOSE
+#    include <sstream>
+#endif
 
 namespace tbd {
 
@@ -110,11 +112,15 @@ class engine
         {
             update();
 
+            if (contains(ev)) {
+                remove_(ev);
+            }
+
             if (timeout_ms <= 0) {
                 return;
             }
 
-            assert(!contains(ev));
+            // assert(!contains(ev));
 
             timer_event new_ev{ev, timeout_ms};
 
@@ -211,21 +217,26 @@ class engine
         {
             (void)func;
             (void)ev;
-#ifdef EVENT_ENGINE_VERBOSE
+#if defined(EVENT_ENGINE_VERBOSE) && (EVENT_ENGINE_VERBOSE == 2)
             bool omit = true;
-            printf(" *** [%ld] %s(%d): {", syscall(SYS_gettid), func, ev->handle());
-            int i = 0;
+            unsigned max_on_omit = 20;
+            std::ostringstream ss;
+            ss << " *** [" << syscall(SYS_gettid) << "] " << func << "(" << ((event*)ev)->handle()
+               << "): {";
+            unsigned i = 0;
             long total = 0;
             for (const auto& te : event_list_) {
-                if (!omit || i < 10) {
-                    printf(" [%d] = { fd = %d, delta_ms = %d },", i, te.ev->handle(), te.delta_ms);
+                if (!omit || i < max_on_omit) {
+                    ss << " {fd=" << ((event*)te.ev)->handle() << ", delta_ms=" << te.delta_ms
+                       << "},";
                 }
                 total += te.delta_ms;
                 ++i;
             }
             auto len = event_list_.size();
-            printf("%s } (len [%lu], total [%ld]) ***\n", ((omit && len > 10) ? " ..." : ""), len,
-                   total);
+            ss << ((omit && len > max_on_omit) ? " ..." : "") << " } (len [" << len << ", total ["
+               << total << "]) ***";
+            puts(ss.str().c_str());
 #endif
         }
     };  // timer_list
@@ -245,7 +256,6 @@ class engine
     };
 
     int epollfd_ = -1;
-    int eventfd_ = -1;
     int nevents_ = 0;
     std::mutex mtx_;
     std::deque<event_request> requestq_;
@@ -258,38 +268,35 @@ class engine
         if (epollfd_ < 0) {
             throw std::system_error(errno, std::generic_category());
         }
-
-        eventfd_ = ::eventfd(0, EFD_SEMAPHORE);
-        if (eventfd_ < 0) {
-            throw std::system_error(errno, std::generic_category());
-        }
-
-        add_event(eventfd_, this, 0, false);
     }
 
     virtual ~engine()
     {
         detail::close(epollfd_);
-        detail::close(eventfd_);
     }
 
     void register_event(event* ev, int timeout_ms = 0)
     {
-        add_requestq(EV_ADD, ev, timeout_ms);
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        requestq_.emplace_back(event_request{EV_ADD, ev, timeout_ms});
     }
 
     void register_timer(event* ev, int timeout_ms)
     {
-        add_requestq(EV_TIM, ev, timeout_ms);
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        requestq_.emplace_back(event_request{EV_TIM, ev, timeout_ms});
     }
 
     void deregister(event* ev)
     {
-        add_requestq(EV_DEL, ev, 0);
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        requestq_.emplace_back(event_request{EV_DEL, ev, 0});
     }
 
     void run_next()
     {
+        [[maybe_unused]] bool changed = update_interest_list();
+
         struct epoll_event eev[nevents_];
         ::memset(eev, 0, sizeof(struct epoll_event) * nevents_);
         int nfds = ::epoll_wait(epollfd_, eev, nevents_, timerq_.next_expiry());
@@ -303,13 +310,23 @@ class engine
         }
 
         assert(nfds >= 1);
+        [[maybe_unused]] thread_local std::string prev_log_;
+        [[maybe_unused]] thread_local int ndups_ = 0;
+        std::string log;
+        log.reserve(256);
         for (auto i = 0; i < nfds; ++i) {
-            if (eev[i].data.ptr == this) {
-                handle_request();
-            } else {
-                handle_event(eev[i].data.ptr);
-            }
+            handle_event(eev[i].data.ptr);
+#ifdef EVENT_ENGINE_VERBOSE
+            log += "fd=" + std::to_string(((event*)eev[i].data.ptr)->handle()) + " ";
+#endif
         }
+#ifdef EVENT_ENGINE_VERBOSE
+        ndups_ = (changed || log != prev_log_) ? 0 : ndups_ + 1;
+        if (!log.empty() && ndups_ < 3) {
+            printf(" *** epoll wakeup (n=%d,c=%d): %s***\n", nfds, changed, log.c_str());
+        }
+        prev_log_ = log;
+#endif
     }
 
     void run_loop()
@@ -323,41 +340,39 @@ class engine
     /**
      * add new / delete existing event
      */
-    void add_requestq(enum op op, event* ev, int timeout_ms)
-    {
-        static constexpr uint64_t one = 1;
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
-        requestq_.emplace_back(event_request{op, ev, timeout_ms});
-        auto nwritten = ::write(eventfd_, &one, sizeof(one));
-        if (nwritten < 0) {
-            throw std::system_error(errno, std::generic_category());
-        }
-    }
-
-    void handle_request()
+    bool update_interest_list()
     {
         std::unique_lock<decltype(mtx_)> lk(mtx_);
-        auto req = std::move(requestq_.front());
-        requestq_.pop_front();
-        uint64_t one;
-        auto nread = ::read(eventfd_, &one, sizeof(one));
-        if (nread < 0) {
-            throw std::system_error(errno, std::generic_category());
+        bool changed = false;
+        while (!requestq_.empty()) {
+            changed = true;
+            auto req = std::move(requestq_.front());
+            requestq_.pop_front();
+
+            if (req.op == EV_ADD) {
+                add_event(req.ev->handle(), req.ev, req.timeout_ms, req.ev->oneshot());
+            } else if (req.op == EV_DEL) {
+                delete_event(req.ev->handle(), req.ev);
+            } else if (req.op == EV_TIM) {
+#ifdef EVENT_ENGINE_VERBOSE
+                printf(" *** timer.add: fd=%d, ev=%p, timeout_ms=%d ***\n", req.ev->handle(),
+                       req.ev, req.timeout_ms);
+#endif
+                timerq_.add(req.ev, req.timeout_ms);
+            } else {
+                // ignore
+            }
         }
 
-        if (req.op == EV_ADD) {
-            add_event(req.ev->handle(), req.ev, req.timeout_ms, req.ev->oneshot());
-        } else if (req.op == EV_DEL) {
-            delete_event(req.ev->handle(), req.ev);
-        } else if (req.op == EV_TIM) {
-            timerq_.add(req.ev, req.timeout_ms);
-        } else {
-            // ignore
-        }
+        return changed;
     }
 
-    void add_event(int fd, void* ev, int timeout_ms = 0, bool oneshot = true)
+    void add_event(int fd, event* ev, int timeout_ms = 0, bool oneshot = true)
     {
+#ifdef EVENT_ENGINE_VERBOSE
+        printf(" *** add_event: fd=%d, ev=%p, timeout_ms=%d, oneshot=%d ***\n", fd, ev, timeout_ms,
+               oneshot);
+#endif
         struct epoll_event eev;
         ::memset(&eev, 0, sizeof(eev));
         eev.events = EPOLLIN | EPOLLRDHUP | EPOLLPRI | (oneshot ? EPOLLONESHOT : 0U);
@@ -379,8 +394,11 @@ class engine
         }
     }
 
-    void delete_event(int fd, void* ev)
+    void delete_event(int fd, event* ev)
     {
+#ifdef EVENT_ENGINE_VERBOSE
+        printf(" *** delete_event: fd=%d, ev=%p ***\n", fd, ev);
+#endif
         bool enoent = false;
         int ret = ::epoll_ctl(epollfd_, EPOLL_CTL_DEL, fd, nullptr);
         if (ret < 0) {
@@ -404,7 +422,11 @@ class engine
         if (ev->oneshot()) {
             delete_event(ev->handle(), ev);
         }
+
         ev->top_half(true);
+#ifdef EVENT_ENGINE_VERBOSE
+        printf(" *** event timed out: fd=%d ***\n", ev->handle());
+#endif
         exec_bh(ev, true);
     }
 
