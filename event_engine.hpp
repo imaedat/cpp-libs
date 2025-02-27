@@ -9,16 +9,18 @@
 #    include <sys/syscall.h>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <deque>
-#include <list>
 #include <mutex>
+#include <set>
 #include <system_error>
 #include <unordered_set>
 #ifdef EVENT_ENGINE_VERBOSE
 #    include <sstream>
 #endif
+#include <list>
 
 namespace tbd {
 
@@ -70,6 +72,16 @@ class event
         oneshot_ = set;
     }
 
+    int flags() const noexcept
+    {
+        return flags_;
+    }
+
+    void flags(uint32_t newflag) noexcept
+    {
+        flags_ = newflag;
+    }
+
     virtual void top_half(bool)
     {
         // urgent work
@@ -82,6 +94,7 @@ class event
 
   protected:
     int fd_ = -1;
+    uint32_t flags_ = EPOLLIN | EPOLLRDHUP | EPOLLPRI;
     bool oneshot_ = false;
 
     event() noexcept = default;
@@ -97,7 +110,12 @@ class engine
     struct timer_event
     {
         void* ev;
-        int delta_ms;
+        int64_t deadline_ms;
+
+        bool operator<(const timer_event& rhs) const noexcept
+        {
+            return deadline_ms < rhs.deadline_ms;
+        }
     };
 
     class timer_list
@@ -105,112 +123,52 @@ class engine
       public:
         int next_expiry()
         {
-            return (!event_list_.empty()) ? event_list_.front().delta_ms : -1;
+            if (event_list_.empty()) {
+                return -1;
+            }
+
+            int64_t remaining = std::max(event_list_.begin()->deadline_ms - now_ms(), 1L);
+            assert((remaining & 0x00000000ffffffffL) == remaining);
+            return (int)remaining;
         }
 
         void add(void* ev, int timeout_ms)
         {
-            update();
-
-            if (contains(ev)) {
-                remove_(ev);
-            }
-
             if (timeout_ms <= 0) {
                 return;
             }
 
-            // assert(!contains(ev));
-
-            timer_event new_ev{ev, timeout_ms};
-
-            auto it = event_list_.begin();
-            for (; it != event_list_.end(); ++it) {
-                if (new_ev.delta_ms < it->delta_ms) {
-                    it->delta_ms -= new_ev.delta_ms;
-                    break;
-                }
-                new_ev.delta_ms = std::max(new_ev.delta_ms - it->delta_ms, 1);
-            }
-
-            event_list_.insert(it, std::move(new_ev));
-            event_set_.insert(ev);
+            event_list_.emplace(timer_event{ev, now_ms() + timeout_ms});
             dump(__func__, ev);
         }
 
         void remove(void* ev)
         {
-            update();
-            remove_(ev);
+            auto it = std::find_if(event_list_.begin(), event_list_.end(),
+                                   [ev](auto& te) { return te.ev == ev; });
+            if (it != event_list_.end()) {
+                event_list_.erase(it);
+            }
             dump(__func__, ev);
         }
 
         void* pop()
         {
             assert(!event_list_.empty());
-            update();
-            auto* ev = event_list_.front().ev;
-            remove_(ev);
+            auto it = event_list_.begin();
+            auto* ev = it->ev;
+            event_list_.erase(it);
             dump(__func__, ev);
             return ev;
         }
 
       private:
-        std::list<timer_event> event_list_;
-        std::unordered_set<void*> event_set_;
-        std::chrono::steady_clock::time_point last_updated_;
+        std::set<timer_event, std::less<timer_event>> event_list_;
 
-        void remove_(void* ev) noexcept
-        {
-            if (event_list_.empty() || !contains(ev)) {
-                return;
-            }
-
-            auto it = event_list_.begin();
-            do {
-                if (it->ev == ev) {
-                    auto jt = std::next(it);
-                    if (jt != event_list_.end()) {
-                        jt->delta_ms += it->delta_ms;
-                    }
-                    break;
-                }
-            } while (++it != event_list_.end());
-
-            assert(it != event_list_.end());
-            event_list_.erase(it);
-            event_set_.erase(ev);
-        }
-
-        void update() noexcept
+        static int64_t now_ms() noexcept
         {
             using namespace std::chrono;
-            auto now = steady_clock::now();
-            auto elapsed = duration_cast<milliseconds>(now - last_updated_).count();
-            last_updated_ = now;
-
-            if (!event_list_.empty()) {
-                auto over_elapsed = elapsed - event_list_.front().delta_ms;
-                event_list_.front().delta_ms =
-                    (int)std::max(event_list_.front().delta_ms - elapsed, 0L);
-
-                auto it = event_list_.begin();
-                while (over_elapsed > 0 && ++it != event_list_.end()) {
-                    auto over_elapsed_left = it->delta_ms - over_elapsed;
-                    if (over_elapsed_left >= 0) {
-                        it->delta_ms = (int)std::max(it->delta_ms - over_elapsed, 1L);
-                        break;
-                    }
-
-                    it->delta_ms = 1;
-                    over_elapsed = -over_elapsed_left;
-                }
-            }
-        }
-
-        bool contains(void* ev) const noexcept
-        {
-            return event_set_.find(ev) != event_set_.end();
+            return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
         }
 
         void dump(const char* func, void* ev) const noexcept
@@ -224,22 +182,22 @@ class engine
             ss << " *** [" << syscall(SYS_gettid) << "] " << func << "(" << ((event*)ev)->handle()
                << "): {";
             unsigned i = 0;
-            long total = 0;
+            long max_deadline = 0;
             for (const auto& te : event_list_) {
                 if (!omit || i < max_on_omit) {
-                    ss << " {fd=" << ((event*)te.ev)->handle() << ", delta_ms=" << te.delta_ms
+                    ss << " {fd=" << ((event*)te.ev)->handle() << ", deadline=" << te.deadline_ms
                        << "},";
                 }
-                total += te.delta_ms;
+                max_deadline = te.deadline_ms;
                 ++i;
             }
             auto len = event_list_.size();
-            ss << ((omit && len > max_on_omit) ? " ..." : "") << " } (len [" << len << ", total ["
-               << total << "]) ***";
+            ss << ((omit && len > max_on_omit) ? " ..." : "") << " } (len [" << len << "], max ["
+               << max_deadline << "]) ***";
             puts(ss.str().c_str());
 #endif
         }
-    };  // timer_list
+    };
 
     enum op
     {
@@ -375,7 +333,7 @@ class engine
 #endif
         struct epoll_event eev;
         ::memset(&eev, 0, sizeof(eev));
-        eev.events = EPOLLIN | EPOLLRDHUP | EPOLLPRI | (oneshot ? EPOLLONESHOT : 0U);
+        eev.events = ev->flags() | (oneshot ? EPOLLONESHOT : 0U);
         eev.data.ptr = ev;
         int op = EPOLL_CTL_ADD;
     again:
