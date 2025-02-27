@@ -110,6 +110,7 @@ class sender
     sender& operator=(const sender& rhs) noexcept
     {
         if (this != &rhs && rhs.refcnt_) {
+            dec_ref();
             rhs.refcnt_->fetch_add(1);
             refcnt_ = rhs.refcnt_;
             fd_ = rhs.fd_;
@@ -134,11 +135,7 @@ class sender
 
     ~sender()
     {
-        if (refcnt_ && refcnt_->fetch_sub(1) == 1) {
-            ::close(fd_);
-            delete refcnt_;
-            refcnt_ = nullptr;
-        }
+        dec_ref();
         fd_ = -1;
     }
 
@@ -160,6 +157,15 @@ class sender
         : refcnt_(new std::atomic<uint64_t>(1))
         , fd_(fd)
     {}
+
+    void dec_ref()
+    {
+        if (refcnt_ && refcnt_->fetch_sub(1) == 1) {
+            ::close(fd_);
+            delete refcnt_;
+            refcnt_ = nullptr;
+        }
+    }
 
     friend std::pair<sender<T>, receiver<T>> new_channel<T>();
 };
