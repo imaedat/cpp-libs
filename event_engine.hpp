@@ -134,6 +134,8 @@ class engine
 
         void add(void* ev, int timeout_ms)
         {
+            remove_(ev);
+
             if (timeout_ms <= 0) {
                 return;
             }
@@ -144,11 +146,7 @@ class engine
 
         void remove(void* ev)
         {
-            auto it = std::find_if(event_list_.begin(), event_list_.end(),
-                                   [ev](auto& te) { return te.ev == ev; });
-            if (it != event_list_.end()) {
-                event_list_.erase(it);
-            }
+            remove_(ev);
             dump(__func__, ev);
         }
 
@@ -163,12 +161,21 @@ class engine
         }
 
       private:
-        std::set<timer_event, std::less<timer_event>> event_list_;
+        std::set<timer_event> event_list_;
 
         static int64_t now_ms() noexcept
         {
             using namespace std::chrono;
             return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        }
+
+        void remove_(void* ev)
+        {
+            auto it = std::find_if(event_list_.begin(), event_list_.end(),
+                                   [ev](auto& te) { return te.ev == ev; });
+            if (it != event_list_.end()) {
+                event_list_.erase(it);
+            }
         }
 
         void dump(const char* func, void* ev) const noexcept
