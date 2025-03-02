@@ -4,6 +4,8 @@ CPPFLAGS += -I..
 LDFLAGS +=
 LDLIBS += -pthread
 
+socket: CXXFLAGS += -Wno-virtual-move-assign
+socket: LDLIBS += -lcrypto -lssl
 sqlite: LDLIBS += -lsqlite3
 
 %: %.cpp
