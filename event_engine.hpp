@@ -107,19 +107,19 @@ class event
 class engine
 {
   protected:
-    struct timer_event
-    {
-        void* ev;
-        int64_t deadline_ms;
-
-        bool operator<(const timer_event& rhs) const noexcept
-        {
-            return deadline_ms < rhs.deadline_ms;
-        }
-    };
-
     class timer_list
     {
+        struct timer_event
+        {
+            void* ev;
+            int64_t deadline_ms;
+
+            bool operator<(const timer_event& rhs) const noexcept
+            {
+                return deadline_ms < rhs.deadline_ms;
+            }
+        };
+
       public:
         int next_expiry()
         {
@@ -204,7 +204,7 @@ class engine
             puts(ss.str().c_str());
 #endif
         }
-    };
+    };  // class timer_list
 
     enum op
     {
@@ -307,17 +307,17 @@ class engine
      */
     bool update_interest_list()
     {
-        std::unique_lock<decltype(mtx_)> lk(mtx_);
         bool changed = false;
+        std::unique_lock<decltype(mtx_)> lk(mtx_);
         while (!requestq_.empty()) {
             changed = true;
             auto req = std::move(requestq_.front());
             requestq_.pop_front();
 
             if (req.op == EV_ADD) {
-                add_event(req.ev->handle(), req.ev, req.timeout_ms, req.ev->oneshot());
+                add_event(req.ev, req.timeout_ms);
             } else if (req.op == EV_DEL) {
-                delete_event(req.ev->handle(), req.ev);
+                delete_event(req.ev);
             } else if (req.op == EV_TIM) {
 #ifdef EVENT_ENGINE_VERBOSE
                 printf(" *** timer.add: fd=%d, ev=%p, timeout_ms=%d ***\n", req.ev->handle(),
@@ -332,19 +332,19 @@ class engine
         return changed;
     }
 
-    void add_event(int fd, event* ev, int timeout_ms = 0, bool oneshot = false)
+    void add_event(event* ev, int timeout_ms = 0)
     {
 #ifdef EVENT_ENGINE_VERBOSE
-        printf(" *** add_event: fd=%d, ev=%p, timeout_ms=%d, oneshot=%d ***\n", fd, ev, timeout_ms,
-               oneshot);
+        printf(" *** add_event: fd=%d, ev=%p, timeout_ms=%d, oneshot=%d ***\n", ev->handle(), ev,
+               timeout_ms, ev->oneshot());
 #endif
         struct epoll_event eev;
         ::memset(&eev, 0, sizeof(eev));
-        eev.events = ev->flags() | (oneshot ? EPOLLONESHOT : 0U);
+        eev.events = ev->flags() | (ev->oneshot() ? EPOLLONESHOT : 0U);
         eev.data.ptr = ev;
         int op = EPOLL_CTL_ADD;
     again:
-        int ret = ::epoll_ctl(epollfd_, op, fd, &eev);
+        int ret = ::epoll_ctl(epollfd_, op, ev->handle(), &eev);
         if (ret < 0) {
             if (errno == EEXIST) {
                 op = EPOLL_CTL_MOD;
@@ -359,13 +359,13 @@ class engine
         }
     }
 
-    void delete_event(int fd, event* ev)
+    void delete_event(event* ev)
     {
 #ifdef EVENT_ENGINE_VERBOSE
-        printf(" *** delete_event: fd=%d, ev=%p ***\n", fd, ev);
+        printf(" *** delete_event: fd=%d, ev=%p ***\n", ev->handle(), ev);
 #endif
         bool enoent = false;
-        int ret = ::epoll_ctl(epollfd_, EPOLL_CTL_DEL, fd, nullptr);
+        int ret = ::epoll_ctl(epollfd_, EPOLL_CTL_DEL, ev->handle(), nullptr);
         if (ret < 0) {
             if (!(enoent = (errno == ENOENT))) {
                 throw std::system_error(errno, std::generic_category());
@@ -385,7 +385,7 @@ class engine
     {
         auto* ev = (event*)timerq_.pop();
         if (ev->oneshot()) {
-            delete_event(ev->handle(), ev);
+            delete_event(ev);
         }
 
         ev->top_half(true);
@@ -399,7 +399,7 @@ class engine
     {
         auto* ev = (event*)ptr;
         if (ev->oneshot()) {
-            delete_event(ev->handle(), ev);
+            delete_event(ev);
         } else {
             timerq_.remove(ev);
         }
