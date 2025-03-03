@@ -77,7 +77,7 @@ void tls()
         LOG("server : done\n");
     });
 
-    usleep(100 * 1000);
+    usleep(500 * 1000);
 
     ssl_ctx ctx;
     ctx.load_ca_file("cacert.pem");

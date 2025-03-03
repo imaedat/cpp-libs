@@ -320,6 +320,22 @@ template <typename Handle>
 class io_socket : virtual public socket_base
 {
   public:
+    io_socket(io_socket&& rhs) noexcept
+    {
+        *this = std::move(rhs);
+    }
+    io_socket& operator=(io_socket&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            socket_base::operator=(std::move(rhs));
+            write_fn_ = rhs.write_fn_;
+            read_fn_ = rhs.read_fn_;
+            rhs.write_fn_ = nullptr;
+            rhs.read_fn_ = nullptr;
+        }
+        return *this;
+    }
+
     /**
      * send family
      */
@@ -393,8 +409,8 @@ class io_socket : virtual public socket_base
     }
 
   protected:
-    int (*write_fn_)(Handle, const void*, int);
-    int (*read_fn_)(Handle, void*, int);
+    int (*write_fn_)(Handle, const void*, int) = nullptr;
+    int (*read_fn_)(Handle, void*, int) = nullptr;
 
     io_socket(int (*wfn)(Handle, const void*, int), int (*rfn)(Handle, void*, int))
         : write_fn_(wfn)
@@ -807,9 +823,14 @@ class ssl
     ~ssl() noexcept
     {
         if (ssl_) {
+            int fd = get_fd();
             ::SSL_shutdown(ssl_);
             ::SSL_free(ssl_);
             ssl_ = nullptr;
+            if (fd >= 0) {
+                ::shutdown(fd, SHUT_RDWR);
+                ::close(fd);
+            }
         }
     }
 
@@ -868,8 +889,21 @@ class secure_socket_base : virtual public socket_base
   public:
     secure_socket_base(const secure_socket_base&) = delete;
     secure_socket_base& operator=(const secure_socket_base&) = delete;
-    secure_socket_base(secure_socket_base&&) noexcept = default;
-    secure_socket_base& operator=(secure_socket_base&&) noexcept = default;
+    secure_socket_base(secure_socket_base&& rhs) noexcept
+        : socket_base(std::move(rhs))
+        , ctx_(std::move(rhs.ctx_))
+        , ssl_(std::move(rhs.ssl_))
+    {
+    }
+    secure_socket_base& operator=(secure_socket_base&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            socket_base::operator=(std::move(rhs));
+            ctx_ = std::move(rhs.ctx_);
+            ssl_ = std::move(rhs.ssl_);
+        }
+        return *this;
+    }
 
   protected:
     ssl_ctx ctx_;
