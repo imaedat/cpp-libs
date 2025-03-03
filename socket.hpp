@@ -62,12 +62,12 @@ int set_nonblock(int fd, bool set = true)
     return old_flags;
 }
 
-int write_compat(int fd, const void* buf, int size)
+int write_compat(int fd, const void* buf, int size) noexcept
 {
     return (int)::write(fd, buf, (size_t)size);
 }
 
-int read_compat(int fd, void* buf, int size)
+int read_compat(int fd, void* buf, int size) noexcept
 {
     return (int)::read(fd, buf, (size_t)size);
 }
@@ -165,7 +165,7 @@ class resolver
     // { hostname => ipaddr }
     std::unordered_map<std::string, std::string> host_addrs_;
 
-    resolver() = default;
+    resolver() noexcept = default;
 };
 
 /****************************************************************************
@@ -189,18 +189,25 @@ class socket_base
         return *this;
     }
 
-    virtual ~socket_base()
+    virtual ~socket_base() noexcept
     {
         close();
     }
 
-    void close()
+    void close() noexcept
     {
         if (raw_fd_ >= 0) {
             ::shutdown(raw_fd_, SHUT_RDWR);
             ::close(raw_fd_);
             raw_fd_ = -1;
         }
+    }
+
+    int release() noexcept
+    {
+        int fd = raw_fd_;
+        raw_fd_ = -1;
+        return fd;
     }
 
     virtual int native_handle() const noexcept
@@ -261,7 +268,7 @@ class socket_base
   protected:
     int raw_fd_ = -1;
 
-    socket_base() = default;
+    socket_base() noexcept = default;
 
     bool is_readable() const
     {
@@ -318,18 +325,13 @@ class io_socket : virtual public socket_base
     io_socket& operator=(io_socket&&) noexcept = default;
 
     virtual std::error_code send(const void* buf, size_t size, size_t* nsent = nullptr) = 0;
-    virtual std::error_code send(std::string_view msg, size_t* nsent = nullptr) = 0;
-    virtual std::error_code recv_some(void* buf, size_t size, int timeout_ms,
+    virtual std::error_code recv_some(void* buf, size_t size, int timeout_ms = -1,
                                       size_t* nrecv = nullptr) = 0;
-    virtual std::error_code recv_some(void* buf, size_t size, size_t* nrecv = nullptr) = 0;
-    virtual std::error_code recv(void* buf, size_t size, int timeout_ms,
-                                 size_t* nrecv = nullptr) = 0;
-    virtual std::error_code recv(void* buf, size_t size, size_t* nrecv = nullptr) = 0;
 
   protected:
-    io_socket() = default;
+    io_socket() noexcept = default;
 
-    virtual std::error_code handle_error(ssize_t nbytes)
+    virtual std::error_code handle_error(ssize_t nbytes) noexcept
     {
         if (nbytes > 0) {
             return std::error_code();
@@ -347,7 +349,7 @@ class io_helper : public io_socket
 {
   public:
     /**
-     * send
+     * send family
      */
     std::error_code send(const void* buf, size_t size, size_t* nsent = nullptr) override
     {
@@ -358,13 +360,13 @@ class io_helper : public io_socket
         return handle_error(n);
     }
 
-    std::error_code send(std::string_view msg, size_t* nsent = nullptr) override
+    std::error_code send(std::string_view msg, size_t* nsent = nullptr)
     {
         return send(msg.data(), msg.size(), nsent);
     }
 
     /**
-     * recv
+     * recv family
      */
     std::error_code recv_some(void* buf, size_t size, int timeout_ms,
                               size_t* nrecv = nullptr) override
@@ -375,19 +377,18 @@ class io_helper : public io_socket
         }
 
         auto n = read_fn_(io_handle(), buf, size);
-        // asm volatile("int3");
         if (nrecv) {
             *nrecv = n;
         }
         return handle_error(n);
     }
 
-    std::error_code recv_some(void* buf, size_t size, size_t* nrecv = nullptr) override
+    std::error_code recv_some(void* buf, size_t size, size_t* nrecv = nullptr)
     {
         return recv_some(buf, size, -1, nrecv);
     }
 
-    std::error_code recv(void* buf, size_t size, int timeout_ms, size_t* nrecv = nullptr) override
+    std::error_code recv(void* buf, size_t size, int timeout_ms, size_t* nrecv = nullptr)
     {
         using namespace std::chrono;
 
@@ -415,7 +416,7 @@ class io_helper : public io_socket
         return ec;
     }
 
-    std::error_code recv(void* buf, size_t size, size_t* nrecv = nullptr) override
+    std::error_code recv(void* buf, size_t size, size_t* nrecv = nullptr)
     {
         return recv(buf, size, -1, nrecv);
     }
@@ -428,7 +429,7 @@ class io_helper : public io_socket
 };
 
 template <typename Handle>
-class io_socket_tmpl : public io_helper<Handle>
+class io_socket_tmpl
 {
 };
 
@@ -439,21 +440,25 @@ class io_socket_tmpl<int> : public io_helper<int>
     io_socket_tmpl<int>(io_socket_tmpl<int>&&) noexcept = default;
     io_socket_tmpl<int>& operator=(io_socket_tmpl<int>&&) noexcept = default;
 
-    ~io_socket_tmpl<int>()
-    {
-    }
-
   protected:
-    io_socket_tmpl<int>()
+    io_socket_tmpl<int>() noexcept
     {
         write_fn_ = detail::write_compat;
         read_fn_ = detail::read_compat;
+    }
+
+    explicit io_socket_tmpl<int>(int fd) noexcept
+        : io_socket_tmpl<int>()
+    {
+        raw_fd_ = fd;
     }
 
     int io_handle() const noexcept override
     {
         return native_handle();
     }
+
+    friend class tcp_server;
 };
 
 using tcp_socket = io_socket_tmpl<int>;
@@ -568,19 +573,7 @@ class tcp_client
 };
 
 // tcp_session -------------------------------------------------------------
-class tcp_session : public tcp_socket
-{
-  public:
-    tcp_session(tcp_session&&) = default;
-
-  private:
-    explicit tcp_session(int sockfd)
-    {
-        raw_fd_ = sockfd;
-    }
-
-    friend class tcp_server;
-};
+using tcp_session = io_socket_tmpl<int>;
 
 /****************************************************************************
  * which can accept
@@ -615,7 +608,7 @@ class tcp_server
         }
         setsockopt(SO_REUSEADDR, 1);
         bind(addr, port);
-        listen_(backlog);
+        SYSCALL(::listen, native_handle(), backlog);
         set_nonblock();
     }
 
@@ -658,11 +651,6 @@ class tcp_server
     friend class acceptor<tcp_server, int>;
 
   private:
-    void listen_(size_t backlog = 1024)
-    {
-        SYSCALL(::listen, native_handle(), backlog);
-    }
-
     int accept_()
     {
         struct sockaddr_in peer;
@@ -706,11 +694,11 @@ class ssl_ctx
     }
 
     // copyable
-    ssl_ctx(const ssl_ctx& rhs)
+    ssl_ctx(const ssl_ctx& rhs) noexcept
     {
         *this = rhs;
     }
-    ssl_ctx& operator=(const ssl_ctx& rhs)
+    ssl_ctx& operator=(const ssl_ctx& rhs) noexcept
     {
         if (this != &rhs) {
             ::SSL_CTX_free(ctx_);
@@ -736,10 +724,12 @@ class ssl_ctx
         return *this;
     }
 
-    ~ssl_ctx()
+    ~ssl_ctx() noexcept
     {
-        ::SSL_CTX_free(ctx_);
-        ctx_ = nullptr;
+        if (ctx_) {
+            ::SSL_CTX_free(ctx_);
+            ctx_ = nullptr;
+        }
     }
 
     SSL_CTX* get() const noexcept
@@ -781,7 +771,7 @@ class ssl_ctx
         }
     }
 
-    ssl new_ssl(int) const;
+    ssl new_ssl(tcp_socket&&) const;
 
   private:
     SSL_CTX* ctx_ = nullptr;
@@ -801,10 +791,10 @@ class ssl
         }
     }
 
-    ssl(const ssl_ctx& ctx, int fd)
+    ssl(const ssl_ctx& ctx, tcp_socket&& sock)
         : ssl(ctx)
     {
-        set_fd(fd);
+        set_fd(sock.release());
     }
 
     // not copyable
@@ -825,7 +815,7 @@ class ssl
         return *this;
     }
 
-    ~ssl()
+    ~ssl() noexcept
     {
         if (ssl_) {
             ::SSL_shutdown(ssl_);
@@ -837,8 +827,13 @@ class ssl
     void set_fd(int fd)
     {
         if (!::SSL_set_fd(ssl_, fd)) {
-            THROW_SSLERR("SSL_new");
+            THROW_SSLERR("SSL_set_fd");
         }
+    }
+
+    int get_fd() const noexcept
+    {
+        return ::SSL_get_fd(ssl_);
     }
 
     SSL* get() const noexcept
@@ -871,9 +866,9 @@ class ssl
     SSL* ssl_ = nullptr;
 };
 
-ssl ssl_ctx::new_ssl(int fd) const
+ssl ssl_ctx::new_ssl(tcp_socket&& sock) const
 {
-    return ssl(*this, fd);
+    return ssl(*this, std::move(sock));
 }
 
 /****************************************************************************
@@ -902,6 +897,11 @@ class secure_socket_base : virtual public socket_base
         , ssl_(std::move(ssl))
     {
     }
+
+    int native_handle() const noexcept override
+    {
+        return ssl_.get_fd();
+    }
 };
 
 /****************************************************************************
@@ -923,7 +923,7 @@ class io_socket_tmpl<SSL*>
         setup();
     }
 
-    explicit io_socket_tmpl<SSL*>(ssl& ssl)
+    explicit io_socket_tmpl<SSL*>(ssl&& ssl)
         : secure_socket_base(ssl)
     {
         setup();
@@ -934,7 +934,7 @@ class io_socket_tmpl<SSL*>
         return ssl_.get();
     }
 
-    std::error_code handle_error(ssize_t nbytes) override
+    std::error_code handle_error(ssize_t nbytes) noexcept override
     {
         if (nbytes > 0) {
             return std::error_code();
@@ -964,7 +964,6 @@ class io_socket_tmpl<SSL*>
         while (remains != 0) {
             auto t1 = steady_clock::now();
             if (handshake_nb_()) {
-                print_cipher();
                 return;
             }
             if (!wait_readable(remains)) {
@@ -1001,43 +1000,47 @@ class io_socket_tmpl<SSL*>
 
   private:
     int (*handshake_fn_)(SSL*);
+    std::string method_;
 
-    void setup()
+    void setup() noexcept
     {
         write_fn_ = ::SSL_write;
         read_fn_ = ::SSL_read;
 
         if (::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_client_method()) {
             handshake_fn_ = ::SSL_connect;
+            method_ = "Client";
         } else {
             handshake_fn_ = ::SSL_accept;
+            method_ = "Server";
         }
     }
 
-    void print_cipher() const
+    void print_cipher() const noexcept
     {
 #if 0
         const char* version = ::SSL_get_version(ssl_.get());
         const auto* cipher = ::SSL_get_current_cipher(ssl_.get());
         const char* cipher_name = ::SSL_CIPHER_get_name(cipher);
-        printf(" *** [%04ld] %s, %s ***\n", syscall(SYS_gettid), version, cipher_name);
+        printf(" *** [%04ld] %s: %s, %s ***\n", syscall(SYS_gettid), method_.c_str(), version,
+               cipher_name);
 #endif
     }
-};
 
-using secure_socket = io_socket_tmpl<SSL*>;
+    friend class tls_server;
+};
 
 /****************************************************************************
  * TLS
  */
 // tls_client --------------------------------------------------------------
 class tls_client
-    : public secure_socket
+    : public io_socket_tmpl<SSL*>
     , public connector
 {
   public:
     tls_client(const ssl_ctx& ctx, std::string_view peer, uint16_t port)
-        : secure_socket(ctx)
+        : io_socket_tmpl<SSL*>(ctx)
         , tcp_(peer, port)
     {
         assert(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_client_method());
@@ -1090,28 +1093,7 @@ class tls_client
 };
 
 // tls_session -------------------------------------------------------------
-class tls_session : public secure_socket
-{
-  public:
-    tls_session(tls_session&&) noexcept = default;
-    tls_session& operator=(tls_session&&) noexcept = default;
-
-    int native_handle() const noexcept override
-    {
-        return tcp_.native_handle();
-    }
-
-  private:
-    tcp_socket tcp_;
-
-    explicit tls_session(ssl&& ssl, tcp_socket&& sess)
-        : secure_socket(ssl)
-        , tcp_(std::move(sess))
-    {
-    }
-
-    friend class tls_server;
-};
+using tls_session = io_socket_tmpl<SSL*>;
 
 // tls_server --------------------------------------------------------------
 class tls_server
@@ -1145,8 +1127,8 @@ class tls_server
         accept_state_ = 1;
         auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
         auto remains = (timeout_ms < 0) ? -1 : timeout_ms - elapsed;
-        auto new_ssl = ctx_.new_ssl(new_tcp.native_handle());
-        tls_session new_tls(std::move(new_ssl), std::move(new_tcp));
+        auto new_ssl = ctx_.new_ssl(std::move(new_tcp));
+        tls_session new_tls(std::move(new_ssl));
         new_tls.handshake_(remains);
         accept_state_ = 0;
         return new_tls;
@@ -1158,8 +1140,8 @@ class tls_server
         case 0: {
             auto new_tcp = tcp_.accept_nb();
             if (new_tcp) {
-                auto new_ssl = ctx_.new_ssl(new_tcp->native_handle());
-                new_tls_in_progress_ = tls_session(std::move(new_ssl), std::move(*new_tcp));
+                auto new_ssl = ctx_.new_ssl(std::move(*new_tcp));
+                new_tls_in_progress_ = tls_session(std::move(new_ssl));
                 accept_state_ = 1;
             }
             return std::nullopt;
