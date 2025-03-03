@@ -316,42 +316,14 @@ class socket_base
 /****************************************************************************
  * which can send, recv
  */
-class io_socket : virtual public socket_base
-{
-  public:
-    io_socket(const io_socket&) = delete;
-    io_socket& operator=(const io_socket&) = delete;
-    io_socket(io_socket&&) noexcept = default;
-    io_socket& operator=(io_socket&&) noexcept = default;
-
-    virtual std::error_code send(const void* buf, size_t size, size_t* nsent = nullptr) = 0;
-    virtual std::error_code recv_some(void* buf, size_t size, int timeout_ms = -1,
-                                      size_t* nrecv = nullptr) = 0;
-
-  protected:
-    io_socket() noexcept = default;
-
-    virtual std::error_code handle_error(ssize_t nbytes) noexcept
-    {
-        if (nbytes > 0) {
-            return std::error_code();
-        }
-        if (nbytes == 0) {
-            return std::error_code(ENOENT, std::generic_category());
-        }
-
-        return std::error_code(errno, std::generic_category());
-    }
-};
-
 template <typename Handle>
-class io_helper : public io_socket
+class io_socket : virtual public socket_base
 {
   public:
     /**
      * send family
      */
-    std::error_code send(const void* buf, size_t size, size_t* nsent = nullptr) override
+    std::error_code send(const void* buf, size_t size, size_t* nsent = nullptr)
     {
         auto n = write_fn_(io_handle(), buf, size);
         if (nsent) {
@@ -368,8 +340,7 @@ class io_helper : public io_socket
     /**
      * recv family
      */
-    std::error_code recv_some(void* buf, size_t size, int timeout_ms,
-                              size_t* nrecv = nullptr) override
+    std::error_code recv_some(void* buf, size_t size, int timeout_ms, size_t* nrecv = nullptr)
     {
         bool ok = wait_readable(timeout_ms);
         if (!ok) {
@@ -425,30 +396,47 @@ class io_helper : public io_socket
     int (*write_fn_)(Handle, const void*, int);
     int (*read_fn_)(Handle, void*, int);
 
+    io_socket(int (*wfn)(Handle, const void*, int), int (*rfn)(Handle, void*, int))
+        : write_fn_(wfn)
+        , read_fn_(rfn)
+    {
+    }
+
     virtual Handle io_handle() const noexcept = 0;
+
+    virtual std::error_code handle_error(ssize_t nbytes) noexcept
+    {
+        if (nbytes > 0) {
+            return std::error_code();
+        }
+        if (nbytes == 0) {
+            return std::error_code(ENOENT, std::generic_category());
+        }
+
+        return std::error_code(errno, std::generic_category());
+    }
 };
 
 template <typename Handle>
-class io_socket_tmpl
+class io_socket_impl
 {
 };
 
 template <>
-class io_socket_tmpl<int> : public io_helper<int>
+class io_socket_impl<int> : public io_socket<int>
 {
   public:
-    io_socket_tmpl<int>(io_socket_tmpl<int>&&) noexcept = default;
-    io_socket_tmpl<int>& operator=(io_socket_tmpl<int>&&) noexcept = default;
+    io_socket_impl<int>(io_socket_impl<int>&&) noexcept = default;
+    io_socket_impl<int>& operator=(io_socket_impl<int>&&) noexcept = default;
 
   protected:
-    io_socket_tmpl<int>() noexcept
+    io_socket_impl<int>() noexcept
+        : io_socket<int>(detail::write_compat, detail::read_compat)
     {
-        write_fn_ = detail::write_compat;
-        read_fn_ = detail::read_compat;
     }
 
-    explicit io_socket_tmpl<int>(int fd) noexcept
-        : io_socket_tmpl<int>()
+    explicit io_socket_impl<int>(int fd) noexcept
+        : io_socket_impl<int>()
     {
         raw_fd_ = fd;
     }
@@ -461,7 +449,7 @@ class io_socket_tmpl<int> : public io_helper<int>
     friend class tcp_server;
 };
 
-using tcp_socket = io_socket_tmpl<int>;
+using tcp_socket = io_socket_impl<int>;
 
 /****************************************************************************
  * which can connect
@@ -512,6 +500,7 @@ class tcp_client
             }
             auto ec = last_error();
             if (ec) {
+                conn_state_ = 0;
                 THROW_SYSERR(ec.value());
             }
             conn_state_ = 2;
@@ -573,7 +562,7 @@ class tcp_client
 };
 
 // tcp_session -------------------------------------------------------------
-using tcp_session = io_socket_tmpl<int>;
+using tcp_session = io_socket_impl<int>;
 
 /****************************************************************************
  * which can accept
@@ -583,12 +572,12 @@ class acceptor
 {
   public:
     // polymorphism by CRTP
-    io_socket_tmpl<Handle> accept(int timeout_ms = -1)
+    io_socket_impl<Handle> accept(int timeout_ms = -1)
     {
         return static_cast<ProtocolServer*>(this)->accept_impl(timeout_ms);
     }
 
-    std::optional<io_socket_tmpl<Handle>> accept_nb()
+    std::optional<io_socket_impl<Handle>> accept_nb()
     {
         return static_cast<ProtocolServer*>(this)->accept_nb_impl();
     }
@@ -908,23 +897,25 @@ class secure_socket_base : virtual public socket_base
  * for SSL_write, SSL_read
  */
 template <>
-class io_socket_tmpl<SSL*>
-    : public io_helper<SSL*>
+class io_socket_impl<SSL*>
+    : public io_socket<SSL*>
     , public secure_socket_base
 {
   public:
-    io_socket_tmpl<SSL*>(io_socket_tmpl<SSL*>&&) noexcept = default;
-    io_socket_tmpl<SSL*>& operator=(io_socket_tmpl<SSL*>&&) noexcept = default;
+    io_socket_impl<SSL*>(io_socket_impl<SSL*>&&) noexcept = default;
+    io_socket_impl<SSL*>& operator=(io_socket_impl<SSL*>&&) noexcept = default;
 
   protected:
-    explicit io_socket_tmpl<SSL*>(const ssl_ctx& ctx)
-        : secure_socket_base(ctx)
+    explicit io_socket_impl<SSL*>(const ssl_ctx& ctx)
+        : io_socket<SSL*>(::SSL_write, ::SSL_read)
+        , secure_socket_base(ctx)
     {
         setup();
     }
 
-    explicit io_socket_tmpl<SSL*>(ssl&& ssl)
-        : secure_socket_base(ssl)
+    explicit io_socket_impl<SSL*>(ssl&& ssl)
+        : io_socket<SSL*>(::SSL_write, ::SSL_read)
+        , secure_socket_base(ssl)
     {
         setup();
     }
@@ -1004,9 +995,6 @@ class io_socket_tmpl<SSL*>
 
     void setup() noexcept
     {
-        write_fn_ = ::SSL_write;
-        read_fn_ = ::SSL_read;
-
         if (::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_client_method()) {
             handshake_fn_ = ::SSL_connect;
             method_ = "Client";
@@ -1035,12 +1023,12 @@ class io_socket_tmpl<SSL*>
  */
 // tls_client --------------------------------------------------------------
 class tls_client
-    : public io_socket_tmpl<SSL*>
+    : public io_socket_impl<SSL*>
     , public connector
 {
   public:
     tls_client(const ssl_ctx& ctx, std::string_view peer, uint16_t port)
-        : io_socket_tmpl<SSL*>(ctx)
+        : io_socket_impl<SSL*>(ctx)
         , tcp_(peer, port)
     {
         assert(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_client_method());
@@ -1093,7 +1081,7 @@ class tls_client
 };
 
 // tls_session -------------------------------------------------------------
-using tls_session = io_socket_tmpl<SSL*>;
+using tls_session = io_socket_impl<SSL*>;
 
 // tls_server --------------------------------------------------------------
 class tls_server
