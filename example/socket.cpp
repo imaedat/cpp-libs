@@ -1,14 +1,33 @@
 #include "socket.hpp"
 
 #include <signal.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <cstdio>
 
 #include "thread_pool.hpp"
-#include "util.h"
 
 using namespace std;
+using namespace std::chrono;
 using namespace tbd;
+
+inline char* now()
+{
+    thread_local char buf[32] = {0};
+
+    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
+    auto sec = count / (1000 * 1000);
+    auto usec = count % (1000 * 1000);
+    struct tm tm;
+    localtime_r(&sec, &tm);
+    strftime(buf, 21, "%F %T.", &tm);
+    sprintf(buf + 20, "%06ld", usec);
+    return buf;
+}
+
+#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
 
 void tcp()
 {

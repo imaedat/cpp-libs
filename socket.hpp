@@ -32,36 +32,23 @@ namespace tbd {
 #define THROW_SYSERR(e) throw std::system_error(e, std::generic_category(), __func__)
 
 #define SYSCALL(func, ...)                                                                         \
-    do {                                                                                           \
-        int rv = func(__VA_ARGS__);                                                                \
-        if (rv < 0) {                                                                              \
+    ({                                                                                             \
+        int ret = func(__VA_ARGS__);                                                               \
+        if (ret < 0) {                                                                             \
             throw std::system_error(errno, std::generic_category(), #func);                        \
         }                                                                                          \
-    } while (0)
+        ret;                                                                                       \
+    })
 
 #define THROW_SSLERR(f)                                                                            \
     do {                                                                                           \
         auto err = ::ERR_get_error();                                                              \
-        throw std::runtime_error(std::string((f)) +                                                \
-                                 " failed: " + ::ERR_error_string(err, nullptr));                  \
+        throw std::runtime_error(std::string((f)) + " " + ::ERR_error_string(err, nullptr));       \
     } while (0)
 
 #define USE_GETADDRINFO
 
 namespace detail {
-int set_nonblock(int fd, bool set = true)
-{
-    int old_flags = ::fcntl(fd, F_GETFL);
-    if (old_flags < 0) {
-        THROW_SYSERR(errno);
-    }
-    if ((set && !(old_flags & O_NONBLOCK)) || (!set && (old_flags & O_NONBLOCK))) {
-        SYSCALL(::fcntl, fd, F_SETFL, (set ? (old_flags | O_NONBLOCK) : (old_flags & ~O_NONBLOCK)));
-    }
-
-    return old_flags;
-}
-
 int write_compat(int fd, const void* buf, int size) noexcept
 {
     return (int)::write(fd, buf, (size_t)size);
@@ -217,7 +204,12 @@ class socket_base
 
     int set_nonblock(bool set = true)
     {
-        return detail::set_nonblock(native_handle(), set);
+        int old_flags = SYSCALL(::fcntl, native_handle(), F_GETFL);
+        if ((set && !(old_flags & O_NONBLOCK)) || (!set && (old_flags & O_NONBLOCK))) {
+            SYSCALL(::fcntl, native_handle(), F_SETFL,
+                    (set ? (old_flags | O_NONBLOCK) : (old_flags & ~O_NONBLOCK)));
+        }
+        return old_flags;
     }
 
     void bind(std::string_view ipaddr, uint16_t port = 0)
@@ -302,10 +294,7 @@ class socket_base
         fds.fd = native_handle();
         fds.events = events;
         fds.revents = 0;
-        int nfds = ::poll(&fds, 1, timeout_ms);
-        if (nfds < 0) {
-            THROW_SYSERR(errno);
-        }
+        int nfds = SYSCALL(::poll, &fds, 1, timeout_ms);
         if (fds.revents & POLLNVAL) {
             THROW_SYSERR(EINVAL);
         }
@@ -358,11 +347,9 @@ class io_socket : virtual public socket_base
      */
     std::error_code recv_some(void* buf, size_t size, int timeout_ms, size_t* nrecv = nullptr)
     {
-        bool ok = wait_readable(timeout_ms);
-        if (!ok) {
+        if (!wait_readable(timeout_ms)) {
             return std::error_code(ETIMEDOUT, std::generic_category());
         }
-
         auto n = read_fn_(io_handle(), buf, size);
         if (nrecv) {
             *nrecv = n;
@@ -380,19 +367,20 @@ class io_socket : virtual public socket_base
         using namespace std::chrono;
 
         size_t nbytes = 0;
-        size_t want = size;
+        size_t wants = size;
         int remains = timeout_ms;
         std::error_code ec;
         char* p = (char*)buf;
-        while (want > 0) {
+        while (wants > 0) {
             auto t1 = steady_clock::now();
-            ec = recv_some(p, size, remains, &nbytes);
+            ec = recv_some(p, wants, remains, &nbytes);
             auto t2 = steady_clock::now();
             if (ec) {
                 break;
             }
+            assert(wants >= nbytes);
+            wants -= nbytes;
             p += nbytes;
-            want -= nbytes;
             auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
             remains = (timeout_ms < 0) ? -1 : std::max(remains - elapsed, 0L);
         }
@@ -420,7 +408,7 @@ class io_socket : virtual public socket_base
 
     virtual Handle io_handle() const noexcept = 0;
 
-    virtual std::error_code handle_error(ssize_t nbytes) noexcept
+    virtual std::error_code handle_error(ssize_t nbytes) const noexcept
     {
         if (nbytes > 0) {
             return std::error_code();
@@ -455,6 +443,7 @@ class io_socket_impl<int> : public io_socket<int>
         : io_socket_impl<int>()
     {
         raw_fd_ = fd;
+        set_nonblock();
     }
 
     int io_handle() const noexcept override
@@ -490,11 +479,20 @@ class tcp_client
         : peer_(peer)
         , port_(port)
     {
-        raw_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (raw_fd_ < 0) {
-            THROW_SYSERR(errno);
-        }
+        raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM, 0);
         set_nonblock();
+    }
+
+    // blocking connect
+    void connect(int timeout_ms = -1) override
+    {
+        if (!connect_nb()) {
+            if (!wait_writable(timeout_ms)) {
+                THROW_SYSERR(ETIMEDOUT);
+            }
+            check_last_error();
+            conn_state_ = 2;
+        }
     }
 
     // non-blocking connect
@@ -507,40 +505,19 @@ class tcp_client
                 THROW_SYSERR(err);
             }
             conn_state_ = 1;
-            return false;
+            [[fallthrough]];
         }
-
         case 1: {
             if (!is_writable()) {
                 return false;
             }
-            auto ec = last_error();
-            if (ec) {
-                conn_state_ = 0;
-                THROW_SYSERR(ec.value());
-            }
+            check_last_error();
             conn_state_ = 2;
-            return true;
+            [[fallthrough]];
         }
-
         default:
             return true;
         }
-    }
-
-    // blocking connect
-    void connect(int timeout_ms = -1) override
-    {
-        connect_nb();
-        if (!wait_writable(timeout_ms)) {
-            THROW_SYSERR(ETIMEDOUT);
-        }
-        assert(conn_state_ == 1);
-        auto ec = last_error();
-        if (ec) {
-            THROW_SYSERR(ec.value());
-        }
-        conn_state_ = 2;
     }
 
   private:
@@ -550,29 +527,28 @@ class tcp_client
 
     int connect_(std::string_view host, uint16_t port)
     {
-        struct sockaddr_in addr;
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-
         auto ipaddr = resolver::get_instance().lookup(host);
         if (ipaddr < 0) {
             return -(ipaddr);
         }
+
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
         addr.sin_addr.s_addr = (uint32_t)ipaddr;
 
         int rv = ::connect(native_handle(), (const struct sockaddr*)&addr, sizeof(addr));
         return (rv == 0) ? 0 : errno;
     }
 
-    std::error_code last_error() const
+    void check_last_error()
     {
         int err;
         socklen_t len = sizeof(err);
         SYSCALL(::getsockopt, native_handle(), SOL_SOCKET, SO_ERROR, &err, &len);
-        if (err == 0) {
-            return std::error_code();
-        } else {
-            return std::error_code(err, std::generic_category());
+        if (err > 0) {
+            conn_state_ = 0;
+            THROW_SYSERR(err);
         }
     }
 };
@@ -607,10 +583,7 @@ class tcp_server
   public:
     tcp_server(std::string_view addr, uint16_t port, int backlog = 1024)
     {
-        raw_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (raw_fd_ < 0) {
-            THROW_SYSERR(errno);
-        }
+        raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM, 0);
         setsockopt(SO_REUSEADDR, 1);
         bind(addr, port);
         SYSCALL(::listen, native_handle(), backlog);
@@ -626,31 +599,30 @@ class tcp_server
     // blocking accept
     tcp_session accept_impl(int timeout_ms = -1)
     {
-        bool ok = wait_readable(timeout_ms);
-        if (!ok) {
+        if (!wait_readable(timeout_ms)) {
             THROW_SYSERR(ETIMEDOUT);
         }
-        int newfd = accept_();
-        if (newfd < 0) {
-            THROW_SYSERR(-newfd);
+        int new_fd = accept_();
+        if (new_fd < 0) {
+            THROW_SYSERR(-new_fd);
         }
 
-        return tcp_session(newfd);
+        return tcp_session(new_fd);
     }
 
     // non-blocking accept
     std::optional<tcp_session> accept_nb_impl()
     {
-        int newfd = accept_();
-        if (newfd < 0) {
-            int err = -newfd;
+        int new_fd = accept_();
+        if (new_fd < 0) {
+            int err = -new_fd;
             if (err == EAGAIN || err == EWOULDBLOCK) {
                 return std::nullopt;
             }
             THROW_SYSERR(err);
         }
 
-        return tcp_session(newfd);
+        return tcp_session(new_fd);
     }
 
     friend class acceptor<tcp_server, int>;
@@ -660,13 +632,8 @@ class tcp_server
     {
         struct sockaddr_in peer;
         socklen_t addrlen = sizeof(peer);
-        int newfd = ::accept(native_handle(), (struct sockaddr*)&peer, &addrlen);
-        if (newfd >= 0) {
-            detail::set_nonblock(newfd);
-            return newfd;
-        } else {
-            return -errno;
-        }
+        int new_fd = ::accept(native_handle(), (struct sockaddr*)&peer, &addrlen);
+        return (new_fd >= 0) ? new_fd : -errno;
     }
 };
 
@@ -683,19 +650,13 @@ class ssl_ctx
   public:
     explicit ssl_ctx(bool is_server = false)
     {
-        using namespace std::literals::string_literals;
-
         if (!(ctx_ = ::SSL_CTX_new(is_server ? ::TLS_server_method() : ::TLS_client_method()))) {
             THROW_SSLERR("SSL_CTX_new");
         }
 
         ::SSL_CTX_set_default_verify_paths(ctx_);
-        if (::SSL_CTX_set_min_proto_version(ctx_, TLS1_3_VERSION) != 1) {
-            auto err = ::ERR_get_error();
-            ::SSL_CTX_free(ctx_);
-            throw std::runtime_error("SSL_CTX_set_min_proto_version failed: "s +
-                                     ::ERR_error_string(err, nullptr));
-        }
+        ::SSL_CTX_set_min_proto_version(ctx_, TLS1_3_VERSION);
+        ::SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
     }
 
     // copyable
@@ -772,7 +733,7 @@ class ssl_ctx
             if (!::SSL_CTX_load_verify_locations(ctx_, cafile.data(), nullptr)) {
                 THROW_SSLERR("SSL_CTX_load_verify_locations");
             }
-            ::SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, verify_callback);
+            // ::SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, verify_callback);
         }
     }
 
@@ -959,7 +920,7 @@ class io_socket_impl<SSL*>
         return ssl_.get();
     }
 
-    std::error_code handle_error(ssize_t nbytes) noexcept override
+    std::error_code handle_error(ssize_t nbytes) const noexcept override
     {
         if (nbytes > 0) {
             return std::error_code();
@@ -968,17 +929,7 @@ class io_socket_impl<SSL*>
             return std::error_code(ENOENT, std::generic_category());
         }
 
-        int err = ::SSL_get_error(ssl_.get(), nbytes);
-        if (err == SSL_ERROR_NONE) {
-            return std::error_code();
-        } else if (err == SSL_ERROR_ZERO_RETURN) {
-            return std::error_code(ENOENT, std::generic_category());
-        } else if (err == SSL_ERROR_WANT_READ) {
-            return std::error_code(EAGAIN, std::generic_category());
-        } else if (err == SSL_ERROR_SSL) {
-            return std::error_code(EPROTO, std::generic_category());
-        }
-        return std::error_code(errno, std::generic_category());
+        return std::error_code(ssl_error_code(nbytes), std::generic_category());
     }
 
     // blocking handshake
@@ -1006,35 +957,57 @@ class io_socket_impl<SSL*>
     bool handshake_nb_()
     {
         auto ret = handshake_fn_(ssl_.get());
-        if (ret < 1) {
+        if (ret >= 1) {
+            print_cipher();
+            return true;
+        }
+
+        int err = ssl_error_code(ret);
+        assert(err != 0);
+        if (err == EAGAIN) {
+            return false;
+        }
+        if (err == EPROTO) {
+#if 0
             auto result = ::SSL_get_verify_result(ssl_.get());
             if (result != X509_V_OK) {
                 throw std::runtime_error(::X509_verify_cert_error_string(result));
             }
+#endif
+            THROW_SSLERR(fname_);
+        } else {
+            throw std::system_error(err, std::generic_category());
         }
-
-        int err = ::SSL_get_error(ssl_.get(), ret);
-        if (err == SSL_ERROR_NONE) {
-            print_cipher();
-            return true;
-        } else if (err == SSL_ERROR_WANT_READ) {
-            return false;
-        }
-        throw std::system_error(errno, std::generic_category());
     }
 
   private:
     int (*handshake_fn_)(SSL*);
-    std::string method_;
+    std::string fname_;
 
     void setup() noexcept
     {
         if (::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_client_method()) {
             handshake_fn_ = ::SSL_connect;
-            method_ = "Client";
+            fname_ = "SSL_connect";
         } else {
             handshake_fn_ = ::SSL_accept;
-            method_ = "Server";
+            fname_ = "SSL_accept";
+        }
+    }
+
+    int ssl_error_code(int ret) const noexcept
+    {
+        switch (::SSL_get_error(ssl_.get(), ret)) {
+        case SSL_ERROR_NONE:
+            return 0;
+        case SSL_ERROR_WANT_READ:
+            return EAGAIN;
+        case SSL_ERROR_ZERO_RETURN:
+            return ENOENT;
+        case SSL_ERROR_SSL:
+            return EPROTO;
+        default:
+            return errno;
         }
     }
 
@@ -1044,8 +1017,8 @@ class io_socket_impl<SSL*>
         const char* version = ::SSL_get_version(ssl_.get());
         const auto* cipher = ::SSL_get_current_cipher(ssl_.get());
         const char* cipher_name = ::SSL_CIPHER_get_name(cipher);
-        printf(" *** [%04ld] %s: %s, %s ***\n", syscall(SYS_gettid), method_.c_str(), version,
-               cipher_name);
+        const char* method = (fname_ == "SSL_connect") ? "Client" : "Server";
+        printf(" *** [%04ld] %s: %s, %s ***\n", syscall(SYS_gettid), method, version, cipher_name);
 #endif
     }
 
@@ -1082,7 +1055,7 @@ class tls_client
         auto t2 = steady_clock::now();
         conn_state_ = 1;
         auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
-        auto remains = (timeout_ms < 0) ? -1 : timeout_ms - elapsed;
+        auto remains = (timeout_ms < 0) ? -1 : std::max(timeout_ms - elapsed, 0L);
         handshake_(remains);
         conn_state_ = 2;
     }
@@ -1091,18 +1064,19 @@ class tls_client
     {
         switch (conn_state_) {
         case 0: {
-            if (tcp_.connect_nb()) {
-                conn_state_ = 1;
+            if (!tcp_.connect_nb()) {
+                return false;
             }
-            return false;
+            conn_state_ = 1;
+            [[fallthrough]];
         }
         case 1: {
             // FIXME exception unsafe
-            if (handshake_nb_()) {
-                conn_state_ = 2;
-                return true;
+            if (!handshake_nb_()) {
+                return false;
             }
-            return false;
+            conn_state_ = 2;
+            [[fallthrough]];
         }
         default:
             return true;
@@ -1148,7 +1122,7 @@ class tls_server
         auto t2 = steady_clock::now();
         accept_state_ = 1;
         auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
-        auto remains = (timeout_ms < 0) ? -1 : timeout_ms - elapsed;
+        auto remains = (timeout_ms < 0) ? -1 : std::max(timeout_ms - elapsed, 0L);
         auto new_ssl = ctx_.new_ssl(std::move(new_tcp));
         tls_session new_tls(std::move(new_ssl));
         new_tls.handshake_(remains);
@@ -1161,22 +1135,23 @@ class tls_server
         switch (accept_state_) {
         case 0: {
             auto new_tcp = tcp_.accept_nb();
-            if (new_tcp) {
-                auto new_ssl = ctx_.new_ssl(std::move(*new_tcp));
-                new_tls_in_progress_ = tls_session(std::move(new_ssl));
-                accept_state_ = 1;
+            if (!new_tcp) {
+                return std::nullopt;
             }
-            return std::nullopt;
+            auto new_ssl = ctx_.new_ssl(std::move(*new_tcp));
+            new_tls_in_progress_ = tls_session(std::move(new_ssl));
+            accept_state_ = 1;
+            [[fallthrough]];
         }
         case 1: {
             // FIXME exception unsafe
-            if (new_tls_in_progress_->handshake_nb_()) {
-                auto new_tls = std::move(*new_tls_in_progress_);
-                new_tls_in_progress_ = std::nullopt;
-                accept_state_ = 0;
-                return new_tls;
+            if (!new_tls_in_progress_->handshake_nb_()) {
+                return std::nullopt;
             }
-            return std::nullopt;
+            auto new_tls = std::move(*new_tls_in_progress_);
+            new_tls_in_progress_ = std::nullopt;
+            accept_state_ = 0;
+            return new_tls;
         }
         default:
             break;
