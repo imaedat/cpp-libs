@@ -56,8 +56,9 @@ void tcp()
 
     tcp_client cli("127.0.0.1", 8080);
     cli.connect();
-    auto [peer, port] = cli.remote_endpoint();
-    LOG("client : connection established to %s:%u\n", peer.c_str(), port);
+    auto [host, lport] = cli.local_endpoint();
+    auto [peer, rport] = cli.remote_endpoint();
+    LOG("client : connection from %s:%u to %s:%u\n", host.c_str(), lport, peer.c_str(), rport);
     usleep(50 * 1000);
     for (int i = 0; i < 10; ++i) {
         auto ec = cli.send(to_string(i));
@@ -102,8 +103,9 @@ void tls()
     ctx.load_ca_file("cacert.pem");
     tls_client cli(ctx, "127.0.0.1", 8433);
     cli.connect();
-    auto [peer, port] = cli.remote_endpoint();
-    LOG("client : connection established to %s:%u\n", peer.c_str(), port);
+    auto [host, lport] = cli.local_endpoint();
+    auto [peer, rport] = cli.remote_endpoint();
+    LOG("client : connection from %s:%u to %s:%u\n", host.c_str(), lport, peer.c_str(), rport);
     usleep(50 * 1000);
     for (int i = 0; i < 10; ++i) {
         auto ec = cli.send(to_string(i));

@@ -13,13 +13,14 @@
 //
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-// XXX
-#include <stdio.h>
-#include <sys/syscall.h>
+
+#ifdef SOCKET_VERBOSE
+#    include <stdio.h>
+#    include <sys/syscall.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
-#include <memory>
 #include <optional>
 #include <regex>
 #include <string>
@@ -29,22 +30,19 @@
 
 namespace tbd {
 
-#define THROW_SYSERR(e) throw std::system_error(e, std::generic_category(), __func__)
+#define THROW_SYSERR(e, f) throw std::system_error((e), std::generic_category(), (f))
 
 #define SYSCALL(func, ...)                                                                         \
     ({                                                                                             \
         int ret = func(__VA_ARGS__);                                                               \
         if (ret < 0) {                                                                             \
-            throw std::system_error(errno, std::generic_category(), #func);                        \
+            THROW_SYSERR(errno, #func);                                                            \
         }                                                                                          \
         ret;                                                                                       \
     })
 
 #define THROW_SSLERR(f)                                                                            \
-    do {                                                                                           \
-        auto err = ::ERR_get_error();                                                              \
-        throw std::runtime_error(std::string((f)) + " " + ::ERR_error_string(err, nullptr));       \
-    } while (0)
+    throw std::runtime_error(std::string(f) + " " + ::ERR_error_string(::ERR_get_error(), nullptr));
 
 #define USE_GETADDRINFO
 
@@ -239,7 +237,7 @@ class socket_base
         char addr_s[20] = {0};
         const char* p = ::inet_ntop(AF_INET, &addr.sin_addr, addr_s, sizeof(addr_s));
         if (!p) {
-            THROW_SYSERR(errno);
+            THROW_SYSERR(errno, "inet_ntop");
         }
         return {addr_s, ntohs(addr.sin_port)};
     }
@@ -252,7 +250,7 @@ class socket_base
         char addr_s[20] = {0};
         const char* p = ::inet_ntop(AF_INET, &addr.sin_addr, addr_s, sizeof(addr_s));
         if (!p) {
-            THROW_SYSERR(errno);
+            THROW_SYSERR(errno, "inet_ntop");
         }
         return {addr_s, ntohs(addr.sin_port)};
     }
@@ -296,7 +294,7 @@ class socket_base
         fds.revents = 0;
         int nfds = SYSCALL(::poll, &fds, 1, timeout_ms);
         if (fds.revents & POLLNVAL) {
-            THROW_SYSERR(EINVAL);
+            THROW_SYSERR(EINVAL, "poll");
         }
         return nfds >= 1;
     }
@@ -462,8 +460,8 @@ using tcp_socket = io_socket_impl<int>;
 class connector
 {
   public:
-    virtual bool connect_nb() = 0;
     virtual void connect(int timeout_ms = -1) = 0;
+    virtual bool connect_nb() = 0;
 };
 
 /****************************************************************************
@@ -488,7 +486,7 @@ class tcp_client
     {
         if (!connect_nb()) {
             if (!wait_writable(timeout_ms)) {
-                THROW_SYSERR(ETIMEDOUT);
+                THROW_SYSERR(ETIMEDOUT, "connect");
             }
             check_last_error();
             conn_state_ = 2;
@@ -500,9 +498,9 @@ class tcp_client
     {
         switch (conn_state_) {
         case 0: {
-            int err = connect_(peer_, port_);
+            int err = connect_();
             if (err != 0 && err != EINPROGRESS) {
-                THROW_SYSERR(err);
+                THROW_SYSERR(err, "connect");
             }
             conn_state_ = 1;
             [[fallthrough]];
@@ -525,16 +523,16 @@ class tcp_client
     uint16_t port_;
     int conn_state_ = 0;
 
-    int connect_(std::string_view host, uint16_t port)
+    int connect_()
     {
-        auto ipaddr = resolver::get_instance().lookup(host);
+        auto ipaddr = resolver::get_instance().lookup(peer_);
         if (ipaddr < 0) {
             return -(ipaddr);
         }
 
         struct sockaddr_in addr;
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
+        addr.sin_port = htons(port_);
         addr.sin_addr.s_addr = (uint32_t)ipaddr;
 
         int rv = ::connect(native_handle(), (const struct sockaddr*)&addr, sizeof(addr));
@@ -548,7 +546,7 @@ class tcp_client
         SYSCALL(::getsockopt, native_handle(), SOL_SOCKET, SO_ERROR, &err, &len);
         if (err > 0) {
             conn_state_ = 0;
-            THROW_SYSERR(err);
+            THROW_SYSERR(err, "connect");
         }
     }
 };
@@ -600,11 +598,11 @@ class tcp_server
     tcp_session accept_impl(int timeout_ms = -1)
     {
         if (!wait_readable(timeout_ms)) {
-            THROW_SYSERR(ETIMEDOUT);
+            THROW_SYSERR(ETIMEDOUT, "accept");
         }
         int new_fd = accept_();
         if (new_fd < 0) {
-            THROW_SYSERR(-new_fd);
+            THROW_SYSERR(-new_fd, "accept");
         }
 
         return tcp_session(new_fd);
@@ -619,13 +617,11 @@ class tcp_server
             if (err == EAGAIN || err == EWOULDBLOCK) {
                 return std::nullopt;
             }
-            THROW_SYSERR(err);
+            THROW_SYSERR(err, "accept");
         }
 
         return tcp_session(new_fd);
     }
-
-    friend class acceptor<tcp_server, int>;
 
   private:
     int accept_()
@@ -635,6 +631,8 @@ class tcp_server
         int new_fd = ::accept(native_handle(), (struct sockaddr*)&peer, &addrlen);
         return (new_fd >= 0) ? new_fd : -errno;
     }
+
+    friend class acceptor<tcp_server, int>;
 };
 
 /****************************************************************************
@@ -825,7 +823,7 @@ class ssl
         return ctx_;
     }
 
-    void set_peername_to_verify(std::string_view peer)
+    void set_verify_hostname(std::string_view peer)
     {
         if (!::SSL_set_tlsext_host_name(ssl_, peer.data()) || !::SSL_set1_host(ssl_, peer.data())) {
             THROW_SSLERR("SSL_set_tlsext_host_name");
@@ -904,15 +902,17 @@ class io_socket_impl<SSL*>
     explicit io_socket_impl<SSL*>(const ssl_ctx& ctx)
         : io_socket<SSL*>(::SSL_write, ::SSL_read)
         , secure_socket_base(ctx)
+        , is_server_(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method())
+        , handshake_fn_(is_server_ ? ::SSL_accept : ::SSL_connect)
     {
-        setup();
     }
 
     explicit io_socket_impl<SSL*>(ssl&& ssl)
         : io_socket<SSL*>(::SSL_write, ::SSL_read)
         , secure_socket_base(ssl)
+        , is_server_(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method())
+        , handshake_fn_(is_server_ ? ::SSL_accept : ::SSL_connect)
     {
-        setup();
     }
 
     SSL* io_handle() const noexcept override
@@ -950,7 +950,7 @@ class io_socket_impl<SSL*>
             remains = (timeout_ms < 0) ? -1 : std::max(timeout_ms - elapsed, 0L);
         }
 
-        THROW_SYSERR(ETIMEDOUT);
+        THROW_SYSERR(ETIMEDOUT, (is_server_ ? "SSL_accept" : "SSL_connect"));
     }
 
     // non-blocking handshake
@@ -967,33 +967,17 @@ class io_socket_impl<SSL*>
         if (err == EAGAIN) {
             return false;
         }
+        const auto* fname = is_server_ ? "SSL_accept" : "SSL_connect";
         if (err == EPROTO) {
-#if 0
-            auto result = ::SSL_get_verify_result(ssl_.get());
-            if (result != X509_V_OK) {
-                throw std::runtime_error(::X509_verify_cert_error_string(result));
-            }
-#endif
-            THROW_SSLERR(fname_);
+            THROW_SSLERR(fname);
         } else {
-            throw std::system_error(err, std::generic_category());
+            THROW_SYSERR(err, fname);
         }
     }
 
   private:
-    int (*handshake_fn_)(SSL*);
-    std::string fname_;
-
-    void setup() noexcept
-    {
-        if (::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_client_method()) {
-            handshake_fn_ = ::SSL_connect;
-            fname_ = "SSL_connect";
-        } else {
-            handshake_fn_ = ::SSL_accept;
-            fname_ = "SSL_accept";
-        }
-    }
+    bool is_server_ = false;
+    int (*handshake_fn_)(SSL*) = nullptr;
 
     int ssl_error_code(int ret) const noexcept
     {
@@ -1013,12 +997,11 @@ class io_socket_impl<SSL*>
 
     void print_cipher() const noexcept
     {
-#if 0
+#ifdef SOCKET_VERBOSE
         const char* version = ::SSL_get_version(ssl_.get());
-        const auto* cipher = ::SSL_get_current_cipher(ssl_.get());
-        const char* cipher_name = ::SSL_CIPHER_get_name(cipher);
-        const char* method = (fname_ == "SSL_connect") ? "Client" : "Server";
-        printf(" *** [%04ld] %s: %s, %s ***\n", syscall(SYS_gettid), method, version, cipher_name);
+        const char* cipher = ::SSL_CIPHER_get_name(::SSL_get_current_cipher(ssl_.get()));
+        printf(" *** [%04ld] %s Handshake: %s, %s ***\n", syscall(SYS_gettid),
+               (is_server_ ? "Server" : "Client"), version, cipher);
 #endif
     }
 
@@ -1101,6 +1084,7 @@ class tls_server
         : secure_socket_base(ctx)
         , tcp_(addr, port, backlog)
     {
+        assert(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method());
     }
 
     explicit tls_server(const ssl_ctx& ctx, uint16_t port, int backlog = 1024)
@@ -1138,8 +1122,7 @@ class tls_server
             if (!new_tcp) {
                 return std::nullopt;
             }
-            auto new_ssl = ctx_.new_ssl(std::move(*new_tcp));
-            new_tls_in_progress_ = tls_session(std::move(new_ssl));
+            new_tls_in_progress_ = tls_session(ctx_.new_ssl(std::move(*new_tcp)));
             accept_state_ = 1;
             [[fallthrough]];
         }
@@ -1160,7 +1143,6 @@ class tls_server
 
   private:
     tcp_server tcp_;
-
     int accept_state_ = 0;
     std::optional<tls_session> new_tls_in_progress_{std::nullopt};
 
