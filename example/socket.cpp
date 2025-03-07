@@ -27,35 +27,14 @@ inline char* now()
     return buf;
 }
 
-#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
+#if 1
+#    define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
+#else
+#    define LOG(fmt, ...)
+#endif
 
-void tcp()
+void cloop(connector& cli)
 {
-    thread_pool pool(1);
-
-    pool.submit([] {
-        tcp_server svr(8080);
-        LOG("server : start w/ port %d\n", 8080);
-        auto sess = svr.accept();
-        auto [peer, port] = sess.remote_endpoint();
-        LOG("server : new connection accepted from %s:%u\n", peer.c_str(), port);
-
-        while (true) {
-            char buf[128] = {0};
-            auto ec = sess.recv_some(buf, 1);
-            if (ec) {
-                LOG("session: receive error: %s\n", ec.message().c_str());
-                break;
-            }
-            LOG("session: recv [%s]\n", buf);
-        }
-        LOG("server : done\n");
-    });
-
-    usleep(100 * 1000);
-
-    tcp_client cli("127.0.0.1", 8080);
-    cli.connect();
     auto [host, lport] = cli.local_endpoint();
     auto [peer, rport] = cli.remote_endpoint();
     LOG("client : connection from %s:%u to %s:%u\n", host.c_str(), lport, peer.c_str(), rport);
@@ -71,61 +50,96 @@ void tcp()
     cli.close();
 }
 
-void tls()
+void sloop(io_socket& sess)
 {
-#if 1
+    auto [peer, port] = sess.remote_endpoint();
+    LOG("server : new connection accepted from %s:%u\n", peer.c_str(), port);
+
+    while (true) {
+        char buf[128] = {0};
+        auto ec = sess.recv_some(buf, 1);
+        if (ec) {
+            LOG("session: receive error: %s\n", ec.message().c_str());
+            break;
+        }
+        LOG("session: recv [%s]\n", buf);
+    }
+    LOG("server : done\n");
+}
+
+void c2s(unique_ptr<connector>& cli, unique_ptr<acceptor>& svr)
+{
     thread_pool pool(1);
 
-    pool.submit([] {
-        ssl_ctx ctx(true);
-        ctx.load_certificate("hostcert.pem", "hostkey.pem");
-        tls_server svr(ctx, 8433);
-        LOG("server : start w/ port %d\n", 8433);
-        auto sess = svr.accept();
-        auto [peer, port] = sess.remote_endpoint();
-        LOG("server : new connection accepted from %s:%u\n", peer.c_str(), port);
-
-        while (true) {
-            char buf[128] = {0};
-            auto ec = sess.recv_some(buf, 1);
-            if (ec) {
-                LOG("session: receive error: %s\n", ec.message().c_str());
-                break;
-            }
-            LOG("session: recv [%s]\n", buf);
-        }
-        LOG("server : done\n");
+    pool.submit([&svr] {
+        auto sess = svr->accept();
+        sloop(*sess);
     });
 
     usleep(500 * 1000);
 
-    ssl_ctx ctx;
-    ctx.load_ca_file("cacert.pem");
-    tls_client cli(ctx, "127.0.0.1", 8433);
-    cli.connect();
-    auto [host, lport] = cli.local_endpoint();
-    auto [peer, rport] = cli.remote_endpoint();
-    LOG("client : connection from %s:%u to %s:%u\n", host.c_str(), lport, peer.c_str(), rport);
-    usleep(50 * 1000);
-    for (int i = 0; i < 10; ++i) {
-        auto ec = cli.send(to_string(i));
-        if (ec) {
-            LOG("client : send error: %s\n", ec.message().c_str());
+    cli->connect();
+    cloop(*cli);
+}
+
+void c2s_nb(unique_ptr<connector>& cli, unique_ptr<acceptor>& svr)
+{
+    thread_pool pool(1);
+
+    pool.submit([&svr] {
+        int nacpt = 0;
+        while (true) {
+            auto sess = svr->accept_nb();
+            ++nacpt;
+            if (!sess) {
+                continue;
+            }
+            LOG("server : nacpt=%d\n", nacpt);
+            sloop(*sess);
             break;
         }
+    });
+
+    int nconn = 0;
+    while (!cli->connect_nb()) {
+        ++nconn;
     }
-    LOG("client : done\n");
-    cli.close();
-#endif
+    LOG("client : nconn=%d\n", ++nconn);
+    cloop(*cli);
 }
 
 int main()
 {
     signal(SIGPIPE, SIG_IGN);
 
-    tcp();
-    puts("---");
-    tls();
+    ssl_ctx svr_ctx(true);
+    svr_ctx.load_certificate("hostcert.pem", "hostkey.pem");
+
+    ssl_ctx cli_ctx;
+    cli_ctx.load_ca_file("cacert.pem");
+
+    unique_ptr<connector> cli;
+    unique_ptr<acceptor> svr;
+
+    puts("--- tcp / blocking ---");
+    cli = make_unique<tcp_client>("127.0.0.1", 8080);
+    svr = make_unique<tcp_server>(8080);
+    c2s(cli, svr);
+
+    puts("--- tls / blocking ---");
+    cli = make_unique<tls_client>(cli_ctx, "127.0.0.1", 8443);
+    svr = make_unique<tls_server>(svr_ctx, 8443);
+    c2s(cli, svr);
+
+    puts("--- tcp / non-blocking ---");
+    cli = make_unique<tcp_client>("127.0.0.1", 8080);
+    svr = make_unique<tcp_server>(8080);
+    c2s_nb(cli, svr);
+
+    puts("--- tls / non-blocking ---");
+    cli = make_unique<tls_client>(cli_ctx, "127.0.0.1", 8443);
+    svr = make_unique<tls_server>(svr_ctx, 8443);
+    c2s_nb(cli, svr);
 
     return 0;
 }
