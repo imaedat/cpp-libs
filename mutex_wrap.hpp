@@ -29,7 +29,8 @@ class mutex_wrap
     mutex_wrap(T&& data)
         : data_(std::move(data))
         , mtx_(std::make_unique<M>())
-    {}
+    {
+    }
 
     virtual ~mutex_wrap() = default;
 
@@ -44,7 +45,7 @@ class mutex_wrap
         });
     }
 
-    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    template <typename F, std::enable_if_t<std::is_invocable_v<F, T&>, std::nullptr_t> = nullptr>
     void lock(F&& fn)
     {
         assert_mutex_alive();
@@ -67,7 +68,8 @@ class rwlock_wrap : public mutex_wrap<T, std::shared_mutex>
   public:
     rwlock_wrap(T&& data)
         : mutex_wrap<T, std::shared_mutex>(std::move(data))
-    {}
+    {
+    }
 
     std::unique_ptr<T, Deleter> lock_shared()
     {
@@ -80,7 +82,7 @@ class rwlock_wrap : public mutex_wrap<T, std::shared_mutex>
         });
     }
 
-    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    template <typename F, std::enable_if_t<std::is_invocable_v<F, T&>, std::nullptr_t> = nullptr>
     void lock_shared(F&& fn)
     {
         this->assert_mutex_alive();

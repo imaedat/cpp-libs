@@ -1,8 +1,11 @@
 #include "mutex_wrap.hpp"
 
+#include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <chrono>
+#include <cstdio>
 
 #define THREAD_POOL_ENABLE_WAIT_ALL
 #include "thread_pool.hpp"
@@ -11,19 +14,35 @@ using namespace std;
 using namespace std::chrono;
 using namespace tbd;
 
+inline char* now()
+{
+    thread_local char buf[32] = {0};
+
+    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
+    auto sec = count / (1000 * 1000);
+    auto usec = count % (1000 * 1000);
+    struct tm tm;
+    localtime_r(&sec, &tm);
+    strftime(buf, 21, "%F %T.", &tm);
+    sprintf(buf + 20, "%06ld", usec);
+    return buf;
+}
+
+#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
+
 void normal_mutex(thread_pool& pool)
 {
-    // mutex_wrap<string> str("hello");
     mutex_wrap str(string("hello"));
 
     for (int i = 0; i < 10; ++i) {
         pool.submit([&, i] {
-            printf("task-%02d: start\n", i);
-            auto guard = str.lock();
+            LOG("task-%02d: start\n", i);
             auto ms = random() % 300;
-            printf("task-%02d: acquire resource(%s), work for %lu ms ...\n", i, guard->c_str(), ms);
-            usleep(ms * 1000);
-            printf("task-%02d: finished\n", i);
+            str.lock([&](auto& data) {
+                LOG("task-%02d: acquire resource(%s), work for %lu ms ...\n", i, data.c_str(), ms);
+                usleep(ms * 1000);
+                LOG("task-%02d: finished\n", i);
+            });
         });
     }
 
@@ -31,7 +50,7 @@ void normal_mutex(thread_pool& pool)
 
     unique_lock lk(*str);
     condition_variable cv;
-    cv.wait_for(lk, milliseconds(2000));
+    cv.wait_for(lk, milliseconds(1500));
 }
 
 #define is_writer(i) (((i) % 4 == 0))
@@ -42,13 +61,13 @@ void readwrite_mutex(thread_pool& pool)
 
     for (int i = 0; i < 10; ++i) {
         pool.submit([&, i] {
-            printf("task-%02d: start\n", i);
-            auto guard = is_writer(i) ? str.lock() : str.lock_shared();
+            LOG("task-%02d: start\n", i);
+            const char* role = is_writer(i) ? "write" : "read";
             auto ms = random() % 800;
-            printf("task-%02d: acquire for %s(%s), work for %lu ms ...\n", i,
-                   (is_writer(i) ? "write" : "read "), guard->c_str(), ms);
+            auto guard = is_writer(i) ? str.lock() : str.lock_shared();
+            LOG("task-%02d: acquire %s lock, work for %lu ms ...\n", i, role, ms);
             usleep(ms * 1000);
-            printf("task-%02d: finished\n", i);
+            LOG("task-%02d: release %s lock\n", i, role);
         });
     }
 

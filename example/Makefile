@@ -14,7 +14,7 @@ sqlite: LDLIBS += -lsqlite3
 
 %: %.cpp
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -MMD -MP -MF .$(@).d -o $@ $< $(LDFLAGS) $(LDLIBS)
-	@cat .*.d | awk -F: 'BEGIN { print ".gitignore" }; /^[a-z]/ { print $$1; print "." $$1 ".d" }' > .gitignore
+	@cat .*.d | awk -F: 'BEGIN { print ".gitignore"; print "*.pem" }; /^[a-z]/ { print $$1; print "." $$1 ".d" }' > .gitignore
 
 .PHONY: leak-check
 

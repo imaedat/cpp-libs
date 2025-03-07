@@ -4,7 +4,7 @@
 #include <chrono>
 #include <cmath>
 #ifdef RATE_LIMITR_VERBOSE
-#include <cstdio>
+#    include <cstdio>
 #endif
 #include <deque>
 
@@ -13,7 +13,6 @@ namespace tbd {
 /****************************************************************************
  * Base Class
  */
-template <typename Duration>
 class rate_limiter
 {
   public:
@@ -22,25 +21,28 @@ class rate_limiter
 
   protected:
     uint64_t limit_;
-    Duration window_;
+    std::chrono::nanoseconds window_;
 
-    rate_limiter(uint64_t limit, const Duration& window)
+    template <typename Duration>
+    rate_limiter(uint64_t limit, Duration window)
         : limit_(limit)
         , window_(window)
-    {}
+    {
+    }
 };
 
 /****************************************************************************
  * Token Bucket
  */
-template <typename Duration>
-class token_bucket : public rate_limiter<Duration>
+class token_bucket : public rate_limiter
 {
   public:
-    token_bucket(uint64_t limit, const Duration& window)
-        : rate_limiter<Duration>(limit, window)
+    template <typename Duration>
+    token_bucket(uint64_t limit, Duration window)
+        : rate_limiter(limit, window)
         , tokens_left_(limit_)
-    {}
+    {
+    }
 
     bool try_request(int64_t quantity) override
     {
@@ -71,8 +73,6 @@ class token_bucket : public rate_limiter<Duration>
     }
 
   private:
-    using rate_limiter<Duration>::limit_;
-    using rate_limiter<Duration>::window_;
     uint64_t tokens_left_;
     std::chrono::steady_clock::time_point last_requested_;
 };
@@ -80,14 +80,15 @@ class token_bucket : public rate_limiter<Duration>
 /****************************************************************************
  * Sliding Window Log
  */
-template <typename Duration>
-class sliding_window_log : public rate_limiter<Duration>
+class sliding_window_log : public rate_limiter
 {
   public:
-    sliding_window_log(uint64_t limit, const Duration& window)
-        : rate_limiter<Duration>(limit, window)
+    template <typename Duration>
+    sliding_window_log(uint64_t limit, Duration window)
+        : rate_limiter(limit, window)
         , amount_in_window_(0)
-    {}
+    {
+    }
 
     bool try_request(int64_t quantity) override
     {
@@ -126,8 +127,6 @@ class sliding_window_log : public rate_limiter<Duration>
         uint64_t quantity;
     };
 
-    using rate_limiter<Duration>::limit_;
-    using rate_limiter<Duration>::window_;
     int64_t amount_in_window_;
     std::deque<log_entry> log_;  // (head) old <-> new (tail)
 };
@@ -135,16 +134,17 @@ class sliding_window_log : public rate_limiter<Duration>
 /****************************************************************************
  * Sliding Window Counter
  */
-template <typename Duration>
-class sliding_window_counter : public rate_limiter<Duration>
+class sliding_window_counter : public rate_limiter
 {
   public:
-    sliding_window_counter(uint64_t limit, const Duration& window)
-        : rate_limiter<Duration>(limit, window)
+    template <typename Duration>
+    sliding_window_counter(uint64_t limit, Duration window)
+        : rate_limiter(limit, window)
         , currwin_amount_(0)
         , prevwin_amount_(0)
         , end_of_window_(std::chrono::steady_clock::now() + window_)
-    {}
+    {
+    }
 
     bool try_request(int64_t quantity) override
     {
@@ -173,8 +173,6 @@ class sliding_window_counter : public rate_limiter<Duration>
     }
 
   private:
-    using rate_limiter<Duration>::limit_;
-    using rate_limiter<Duration>::window_;
     uint64_t currwin_amount_;
     uint64_t prevwin_amount_;
     std::chrono::steady_clock::time_point end_of_window_;
