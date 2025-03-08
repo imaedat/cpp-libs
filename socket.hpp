@@ -530,8 +530,7 @@ class tcp_client
         : peer_(peer)
         , port_(port)
     {
-        raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM, 0);
-        set_nonblock();
+        raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     }
 
     // blocking connect
@@ -610,11 +609,10 @@ class tcp_server : public acceptor
   public:
     tcp_server(std::string_view addr, uint16_t port, int backlog = 1024)
     {
-        raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM, 0);
+        raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
         setsockopt(SO_REUSEADDR, 1);
         bind(addr, port);
         SYSCALL(::listen, native_handle(), backlog);
-        set_nonblock();
     }
 
     explicit tcp_server(uint16_t port, int backlog = 1024)
@@ -658,7 +656,7 @@ class tcp_server : public acceptor
     {
         struct sockaddr_in peer;
         socklen_t addrlen = sizeof(peer);
-        int new_fd = ::accept(native_handle(), (struct sockaddr*)&peer, &addrlen);
+        int new_fd = ::accept4(native_handle(), (struct sockaddr*)&peer, &addrlen, SOCK_NONBLOCK);
         return (new_fd >= 0) ? new_fd : -errno;
     }
 };
