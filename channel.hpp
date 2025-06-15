@@ -93,7 +93,8 @@ class receiver
     int fd_ = -1;
     explicit receiver(int fd) noexcept
         : fd_(fd)
-    {}
+    {
+    }
 
     friend std::pair<sender<T>, receiver<T>> new_channel<T>();
 };
@@ -110,8 +111,8 @@ class sender
     sender& operator=(const sender& rhs) noexcept
     {
         if (this != &rhs && rhs.refcnt_) {
-            dec_ref();
             rhs.refcnt_->fetch_add(1);
+            dec_ref();
             refcnt_ = rhs.refcnt_;
             fd_ = rhs.fd_;
         }
@@ -125,10 +126,12 @@ class sender
     }
     sender& operator=(sender&& rhs) noexcept
     {
-        using std::swap;
         if (this != &rhs) {
-            swap(refcnt_, rhs.refcnt_);
-            swap(fd_, rhs.fd_);
+            dec_ref();
+            refcnt_ = rhs.refcnt_;
+            fd_ = rhs.fd_;
+            rhs.refcnt_ = nullptr;
+            rhs.fd_ = -1;
         }
         return *this;
     }
@@ -156,7 +159,8 @@ class sender
     explicit sender(int fd)
         : refcnt_(new std::atomic<uint64_t>(1))
         , fd_(fd)
-    {}
+    {
+    }
 
     void dec_ref()
     {
