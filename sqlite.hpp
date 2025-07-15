@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <sqlite3.h>
@@ -143,16 +144,14 @@ class sqlite
         transaction& operator=(const transaction&) = delete;
         transaction(transaction&& rhs) noexcept
             : db_(rhs.db_)
-            , completed_(rhs.completed_)
+            , completed_(std::exchange(rhs.completed_, true))
         {
-            rhs.completed_ = true;
         }
         transaction& operator=(transaction&& rhs) noexcept
         {
             if (this != &rhs) {
                 db_ = std::move(rhs.db_);
-                completed_ = rhs.completed_;
-                rhs.completed_ = true;
+                completed_ = std::exchange(rhs.completed_, true);
             }
             return *this;
         }
@@ -204,7 +203,8 @@ class sqlite
         explicit transaction(sqlite& db) noexcept
             : db_(db)
             , completed_(false)
-        {}
+        {
+        }
 
         friend class sqlite;
     };
@@ -362,7 +362,8 @@ class sqlite
         field(const char* name, const char* value)
             : name_(name)
             , value_(value)
-        {}
+        {
+        }
 
         friend class row;
     };

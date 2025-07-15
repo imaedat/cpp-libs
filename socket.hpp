@@ -166,15 +166,13 @@ class socket_base
     socket_base(const socket_base&) = delete;
     socket_base& operator=(const socket_base&) = delete;
     socket_base(socket_base&& rhs) noexcept
-        : raw_fd_(rhs.raw_fd_)
+        : raw_fd_(std::exchange(rhs.raw_fd_, -1))
     {
-        rhs.raw_fd_ = -1;
     }
     socket_base& operator=(socket_base&& rhs) noexcept
     {
         if (this != &rhs) {
-            raw_fd_ = rhs.raw_fd_;
-            rhs.raw_fd_ = -1;
+            raw_fd_ = std::exchange(rhs.raw_fd_, -1);
         }
         return *this;
     }
@@ -195,9 +193,7 @@ class socket_base
 
     int release() noexcept
     {
-        int fd = raw_fd_;
-        raw_fd_ = -1;
-        return fd;
+        return std::exchange(raw_fd_, -1);
     }
 
     virtual int native_handle() const noexcept
@@ -365,20 +361,16 @@ class io_socket_tmpl : virtual public io_socket
   public:
     io_socket_tmpl(io_socket_tmpl&& rhs) noexcept
         : socket_base(std::move(rhs))
-        , read_fn_(rhs.read_fn_)
-        , write_fn_(rhs.write_fn_)
+        , read_fn_(std::exchange(rhs.read_fn_, nullptr))
+        , write_fn_(std::exchange(rhs.write_fn_, nullptr))
     {
-        rhs.read_fn_ = nullptr;
-        rhs.write_fn_ = nullptr;
     }
     io_socket_tmpl& operator=(io_socket_tmpl&& rhs) noexcept
     {
         if (this != &rhs) {
             io_socket::operator=(std::move(rhs));
-            read_fn_ = rhs.read_fn_;
-            write_fn_ = rhs.write_fn_;
-            rhs.read_fn_ = nullptr;
-            rhs.write_fn_ = nullptr;
+            read_fn_ = std::exchange(rhs.read_fn_, nullptr);
+            write_fn_ = std::exchange(rhs.write_fn_, nullptr);
         }
         return *this;
     }
@@ -483,19 +475,16 @@ class tcp_socket : public io_socket_tmpl<int>
   public:
     tcp_socket(tcp_socket&& rhs) noexcept
         : socket_base(std::move(rhs))
-        , io_socket_tmpl<int>(rhs.read_fn_, rhs.write_fn_)
+        , io_socket_tmpl<int>(std::exchange(rhs.read_fn_, nullptr),
+                              std::exchange(rhs.write_fn_, nullptr))
     {
-        rhs.read_fn_ = nullptr;
-        rhs.write_fn_ = nullptr;
     }
     tcp_socket& operator=(tcp_socket&& rhs) noexcept
     {
         if (this != &rhs) {
             socket_base::operator=(std::move(rhs));
-            read_fn_ = rhs.read_fn_;
-            write_fn_ = rhs.write_fn_;
-            rhs.read_fn_ = nullptr;
-            rhs.write_fn_ = nullptr;
+            read_fn_ = std::exchange(rhs.read_fn_, nullptr);
+            write_fn_ = std::exchange(rhs.write_fn_, nullptr);
         }
         return *this;
     }
@@ -708,8 +697,7 @@ class ssl_ctx
     {
         if (this != &rhs) {
             ::SSL_CTX_free(ctx_);
-            ctx_ = rhs.ctx_;
-            rhs.ctx_ = nullptr;
+            ctx_ = std::exchange(rhs.ctx_, nullptr);
         }
         return *this;
     }
@@ -799,8 +787,7 @@ class ssl
     {
         if (this != &rhs) {
             ctx_ = std::move(rhs.ctx_);
-            ssl_ = rhs.ssl_;
-            rhs.ssl_ = nullptr;
+            ssl_ = std::exchange(rhs.ssl_, nullptr);
         }
         return *this;
     }
@@ -918,27 +905,23 @@ class tls_socket
   public:
     tls_socket(tls_socket&& rhs) noexcept
         : socket_base(std::move(rhs))
-        , io_socket_tmpl<SSL*>(rhs.read_fn_, rhs.write_fn_)
+        , io_socket_tmpl<SSL*>(std::exchange(rhs.read_fn_, nullptr),
+                               std::exchange(rhs.write_fn_, nullptr))
         , secure_socket_base(std::move(rhs.ctx_), std::move(rhs.ssl_))
         , is_server_(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method())
         , handshake_fn_(is_server_ ? ::SSL_accept : ::SSL_connect)
     {
-        rhs.read_fn_ = nullptr;
-        rhs.write_fn_ = nullptr;
     }
     tls_socket& operator=(tls_socket&& rhs) noexcept
     {
         if (this != &rhs) {
             socket_base::operator=(std::move(rhs));
-            read_fn_ = rhs.read_fn_;
-            write_fn_ = rhs.write_fn_;
-            rhs.read_fn_ = nullptr;
-            rhs.write_fn_ = nullptr;
+            read_fn_ = std::exchange(rhs.read_fn_, nullptr);
+            write_fn_ = std::exchange(rhs.write_fn_, nullptr);
             ctx_ = std::move(rhs.ctx_);
             ssl_ = std::move(rhs.ssl_);
             is_server_ = rhs.is_server_;
-            handshake_fn_ = rhs.handshake_fn_;
-            rhs.handshake_fn_ = nullptr;
+            handshake_fn_ = std::exchange(rhs.handshake_fn_, nullptr);
         }
         return *this;
     }

@@ -7,6 +7,7 @@
 #include <string>
 #include <system_error>
 #include <type_traits>
+#include <utility>
 
 namespace tbd {
 
@@ -29,9 +30,8 @@ class popen
     popen(const popen&) = delete;
     popen& operator=(const popen&) = delete;
     popen(popen&& rhs) noexcept
-        : fp_(rhs.fp_)
+        : fp_(std::exchange(rhs.fp_, nullptr))
     {
-        rhs.fp_ = nullptr;
     }
     popen& operator=(popen&& rhs) noexcept
     {
@@ -39,8 +39,7 @@ class popen
             if (fp_) {
                 ::pclose(fp_);
             }
-            fp_ = rhs.fp_;
-            rhs.fp_ = nullptr;
+            fp_ = std::exchange(rhs.fp_, nullptr);
         }
         return *this;
     }

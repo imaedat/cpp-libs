@@ -6,6 +6,7 @@
 #include <cstring>
 #include <string>
 #include <system_error>
+#include <utility>
 
 namespace tbd {
 
@@ -30,17 +31,14 @@ class pipe
     pipe(const pipe&) = delete;
     pipe& operator=(const pipe&) = delete;
     pipe(pipe&& rhs) noexcept
-        : fds_{rhs.fds_[0], rhs.fds_[1]}
+        : fds_{std::exchange(rhs.fds_[0], -1), std::exchange(rhs.fds_[1], -1)}
     {
-        rhs.fds_[0] = rhs.fds_[1] = -1;
     }
     pipe& operator=(pipe&& rhs) noexcept
     {
         if (this != &rhs) {
-            for (size_t i = 0; i < 2; ++i) {
-                fds_[i] = rhs.fds_[i];
-                rhs.fds_[i] = -1;
-            }
+            fds_[0] = std::exchange(rhs.fds_[0], -1);
+            fds_[1] = std::exchange(rhs.fds_[1], -1);
         }
         return *this;
     }
@@ -57,16 +55,14 @@ class pipe
         writer(const writer&) = delete;
         writer& operator=(const writer&) = delete;
         writer(writer&& rhs) noexcept
-            : wfd_(rhs.wfd_)
+            : wfd_(std::exchange(rhs.wfd_, -1))
         {
-            rhs.wfd_ = -1;
         }
         writer& operator=(writer&& rhs) noexcept
         {
             if (this != &rhs) {
                 close_(wfd_);
-                wfd_ = rhs.wfd_;
-                rhs.wfd_ = -1;
+                wfd_ = std::exchange(rhs.wfd_, -1);
             }
             return *this;
         }
@@ -100,13 +96,12 @@ class pipe
         int wfd_ = -1;
 
         explicit writer(int fds[])
-            : wfd_(fds[1])
+            : wfd_(std::exchange(fds[1], -1))
         {
             if (wfd_ < 0) {
                 throw std::logic_error("writer has already been taken");
             }
             close_(fds[0]);
-            fds[1] = -1;
         }
     };
 
@@ -116,16 +111,14 @@ class pipe
         reader(const reader&) = delete;
         reader& operator=(const reader&) = delete;
         reader(reader&& rhs) noexcept
-            : rfd_(rhs.rfd_)
+            : rfd_(std::exchange(rhs.rfd_, -1))
         {
-            rhs.rfd_ = -1;
         }
         reader& operator=(reader&& rhs) noexcept
         {
             if (this != &rhs) {
                 close_(rfd_);
-                rfd_ = rhs.rfd_;
-                rhs.rfd_ = -1;
+                rfd_ = std::exchange(rhs.rfd_, -1);
             }
             return *this;
         }
@@ -155,7 +148,7 @@ class pipe
             char buf[BUFSZ] = {0};
             std::string result;
             while (auto nread = read(buf, BUFSZ)) {
-                result += buf;
+                result.append(buf, nread);
                 if (nread < BUFSZ) {
                     break;
                 }
@@ -169,12 +162,11 @@ class pipe
         int rfd_ = -1;
 
         explicit reader(int fds[])
-            : rfd_(fds[0])
+            : rfd_(std::exchange(fds[0], -1))
         {
             if (rfd_ < 0) {
                 throw std::logic_error("reader has already been taken");
             }
-            fds[0] = -1;
             close_(fds[1]);
         }
     };
