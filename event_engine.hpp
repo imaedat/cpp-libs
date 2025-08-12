@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 #ifdef EVENT_ENGINE_VERBOSE
 #    include <stdio.h>
@@ -221,6 +222,7 @@ class engine
     };
 
     int epollfd_ = -1;
+    int eventfd_ = -1;
     int nevents_ = 0;
     std::mutex mtx_;
     std::deque<event_request> requestq_;
@@ -233,37 +235,51 @@ class engine
         if (epollfd_ < 0) {
             throw std::system_error(errno, std::generic_category());
         }
+        eventfd_ = ::eventfd(0, 0);
+        if (eventfd_ < 0) {
+            throw std::system_error(errno, std::generic_category());
+        }
+
+        struct epoll_event eev = {};
+        eev.events = EPOLLIN;
+        eev.data.ptr = this;
+        if (::epoll_ctl(epollfd_, EPOLL_CTL_ADD, eventfd_, &eev) < 0) {
+            throw std::system_error(errno, std::generic_category());
+        }
     }
 
     virtual ~engine()
     {
         detail::close(epollfd_);
+        detail::close(eventfd_);
     }
 
     void register_event(event* ev, int timeout_ms = 0)
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
         requestq_.emplace_back(event_request{EV_ADD, ev, timeout_ms});
+        eventfd_write(eventfd_, 1);
     }
 
     void register_timer(event* ev, int timeout_ms)
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
         requestq_.emplace_back(event_request{EV_TIM, ev, timeout_ms});
+        eventfd_write(eventfd_, 1);
     }
 
     void deregister(event* ev)
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
         requestq_.emplace_back(event_request{EV_DEL, ev, 0});
+        eventfd_write(eventfd_, 1);
     }
 
     void run_next()
     {
-        [[maybe_unused]] bool changed = update_interest_list();
+        [[maybe_unused]] bool changed = update_interests();
 
-        struct epoll_event eev[nevents_];
-        ::memset(eev, 0, sizeof(struct epoll_event) * nevents_);
+        struct epoll_event eev[nevents_] = {};
         int nfds = ::epoll_wait(epollfd_, eev, nevents_, timerq_.next_expiry());
         if (nfds < 0) {
             throw std::system_error(errno, std::generic_category());
@@ -280,6 +296,10 @@ class engine
         std::string log;
         log.reserve(256);
         for (auto i = 0; i < nfds; ++i) {
+            if (eev[i].data.ptr == this) {
+                continue;  // ignore
+            }
+
             handle_event(eev[i].data.ptr);
 #ifdef EVENT_ENGINE_VERBOSE
             log += "fd=" + std::to_string(((event*)eev[i].data.ptr)->handle()) + " ";
@@ -305,7 +325,7 @@ class engine
     /**
      * add new / delete existing event
      */
-    bool update_interest_list()
+    bool update_interests()
     {
         bool changed = false;
         std::unique_lock<decltype(mtx_)> lk(mtx_);
@@ -329,6 +349,10 @@ class engine
             }
         }
 
+        if (changed) {
+            eventfd_t value;
+            eventfd_read(eventfd_, &value);
+        }
         return changed;
     }
 
@@ -338,8 +362,7 @@ class engine
         printf(" *** add_event: fd=%d, ev=%p, timeout_ms=%d, oneshot=%d ***\n", ev->handle(), ev,
                timeout_ms, ev->oneshot());
 #endif
-        struct epoll_event eev;
-        ::memset(&eev, 0, sizeof(eev));
+        struct epoll_event eev = {};
         eev.events = ev->flags() | (ev->oneshot() ? EPOLLONESHOT : 0U);
         eev.data.ptr = ev;
         int op = EPOLL_CTL_ADD;
