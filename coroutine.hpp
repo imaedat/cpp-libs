@@ -13,7 +13,7 @@
 #include <system_error>
 
 #ifndef COROUTINE_STACK_SIZE
-#define COROUTINE_STACK_SIZE (8 * 1024)
+#    define COROUTINE_STACK_SIZE (8 * 1024)
 #endif
 
 namespace tbd {
@@ -47,7 +47,8 @@ class coroutine_env
         yielder() = default;
         explicit yielder(coroutine_env<T>* env) noexcept
             : env_(env)
-        {}
+        {
+        }
 
         friend class coroutine_env<T>;
     };
@@ -78,6 +79,7 @@ class coroutine_env
                 swap(finished_, rhs.finished_);
                 swap(env_, rhs.env_);
                 uctx_ = rhs.uctx_;
+                ::makecontext(&uctx_, (void (*)()) & execute, 1, this);
             }
             return *this;
         }
