@@ -80,6 +80,8 @@ class coroutine_env
                 swap(env_, rhs.env_);
                 uctx_ = rhs.uctx_;
                 ::makecontext(&uctx_, (void (*)()) & execute, 1, this);
+                // 1st argument of `execute`
+                // uctx_.uc_mcontext.gregs[REG_RDI] = (greg_t)this;
             }
             return *this;
         }
