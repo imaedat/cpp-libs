@@ -64,7 +64,7 @@ class resolver
     int64_t lookup(std::string_view host)
     {
         static const std::regex re{
-            "^(([1-9]?[0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([1-9]?[0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$"};
+            "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"};
 
         if (std::regex_match(host.data(), re)) {
             return inet_addr(host.data());
@@ -319,6 +319,7 @@ class io_socket : virtual public socket_base
         return *this;
     }
 
+    virtual std::error_code recv_nb(void* buf, size_t size, size_t* nrecv = nullptr) = 0;
     virtual std::error_code recv_some(void* buf, size_t size, int timeout_ms,
                                       size_t* nrecv = nullptr) = 0;
     virtual std::error_code recv_some(void* buf, size_t size, size_t* nrecv = nullptr) = 0;
@@ -338,8 +339,23 @@ class io_socket : virtual public socket_base
 class connector : virtual public io_socket
 {
   public:
+    connector(connector&& rhs) noexcept
+        : io_socket(std::move(rhs))
+    {
+    }
+    connector& operator=(connector&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            io_socket::operator=(std::move(rhs));
+        }
+        return *this;
+    }
+
     virtual void connect(int timeout_ms = -1) = 0;
     virtual bool connect_nb() = 0;
+
+  protected:
+    connector() noexcept = default;
 };
 
 /****************************************************************************
@@ -348,8 +364,23 @@ class connector : virtual public io_socket
 class acceptor : virtual public socket_base
 {
   public:
+    acceptor(acceptor&& rhs) noexcept
+        : socket_base(std::move(rhs))
+    {
+    }
+    acceptor& operator=(acceptor&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            socket_base::operator=(std::move(rhs));
+        }
+        return *this;
+    }
+
     virtual std::unique_ptr<io_socket> accept(int timeout_ms = -1) = 0;
     virtual std::unique_ptr<io_socket> accept_nb() = 0;
+
+  protected:
+    acceptor() noexcept = default;
 };
 
 /****************************************************************************
@@ -375,17 +406,22 @@ class io_socket_tmpl : virtual public io_socket
         return *this;
     }
 
+    std::error_code recv_nb(void* buf, size_t size, size_t* nrecv = nullptr) override
+    {
+        auto n = read_fn_(io_handle(), buf, size);
+        if (nrecv) {
+            *nrecv = n;
+        }
+        return handle_error(n);
+    }
+
     std::error_code recv_some(void* buf, size_t size, int timeout_ms,
                               size_t* nrecv = nullptr) override
     {
         if (!wait_readable(timeout_ms)) {
             return std::error_code(ETIMEDOUT, std::generic_category());
         }
-        auto n = read_fn_(io_handle(), buf, size);
-        if (nrecv) {
-            *nrecv = n;
-        }
-        return handle_error(n);
+        return recv_nb(buf, size, nrecv);
     }
 
     std::error_code recv_some(void* buf, size_t size, size_t* nrecv = nullptr) override
