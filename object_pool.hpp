@@ -17,16 +17,18 @@ template <typename T>
 class object_pool
 {
   public:
-    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    template <typename F, typename = std::enable_if_t<std::is_invocable_v<F>>>
     object_pool(size_t max, F&& builder) noexcept
         : max_objs_(max)
         , nr_objs_(0)
         , builder_(builder)
-    {}
+    {
+    }
 
     explicit object_pool(size_t max)
         : object_pool(max, []() -> T* { return new T(); })
-    {}
+    {
+    }
 
     ~object_pool() = default;
 

@@ -38,7 +38,7 @@ class thread_pool
         }
     }
 
-    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    template <typename F, typename = std::enable_if_t<std::is_invocable_v<F>>>
     void submit(F&& fn)
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);

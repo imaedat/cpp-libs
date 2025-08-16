@@ -9,10 +9,11 @@ namespace tbd {
 class defer_block
 {
   public:
-    template <typename F, std::enable_if_t<std::is_invocable_v<F>, std::nullptr_t> = nullptr>
+    template <typename F, typename = std::enable_if_t<std::is_invocable_v<F>>>
     explicit defer_block(F&& fn) noexcept
         : fn_(std::forward<F>(fn))
-    {}
+    {
+    }
 
     defer_block(const defer_block&) = delete;
     defer_block& operator=(const defer_block&) = delete;

@@ -45,7 +45,7 @@ class mutex_wrap
         });
     }
 
-    template <typename F, std::enable_if_t<std::is_invocable_v<F, T&>, std::nullptr_t> = nullptr>
+    template <typename F, typename = std::enable_if_t<std::is_invocable_v<F, T&>>>
     void lock(F&& fn)
     {
         assert_mutex_alive();
@@ -82,7 +82,7 @@ class rwlock_wrap : public mutex_wrap<T, std::shared_mutex>
         });
     }
 
-    template <typename F, std::enable_if_t<std::is_invocable_v<F, T&>, std::nullptr_t> = nullptr>
+    template <typename F, typename = std::enable_if_t<std::is_invocable_v<F, T&>>>
     void lock_shared(F&& fn)
     {
         this->assert_mutex_alive();

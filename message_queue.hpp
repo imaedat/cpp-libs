@@ -64,16 +64,13 @@ class message_queue
         return eventfd_;
     }
 
-    template <typename U,
-              std::enable_if_t<std::is_same<T, typename std::remove_reference<U>::type>::value,
-                               std::nullptr_t> = nullptr>
+    template <typename U, typename = std::enable_if_t<
+                              std::is_same<T, typename std::remove_reference<U>::type>::value>>
     void push(U&& msg)
     {
-        static constexpr uint64_t one = 1;
-
         std::lock_guard<qmtx_type> lk(*queue_mtx_);
         mq_.push(std::forward<T>(msg));
-        (void)::write(eventfd_, &one, sizeof(one));
+        eventfd_write(eventfd_, 1);
     }
 
     T pop()
