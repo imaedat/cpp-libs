@@ -11,9 +11,11 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <system_error>
@@ -26,7 +28,7 @@
 namespace tbd {
 
 namespace detail {
-inline void close(int& fd)
+inline void close(int& fd) noexcept
 {
     if (fd >= 0) {
         ::close(fd);
@@ -35,25 +37,87 @@ inline void close(int& fd)
 }
 }  // namespace detail
 
+class event;
+class engine;
+
+class task
+{
+  public:
+    task(const task&) = delete;
+    task& operator=(const task&) = delete;
+    task(task&&) noexcept = default;
+    task& operator=(task&&) noexcept = default;
+    virtual ~task() noexcept = default;
+
+  protected:
+    tbd::engine* engine_ = nullptr;
+    std::unique_ptr<std::atomic<bool>> running_;  // make movable
+    std::unique_ptr<std::atomic<bool>> pending_;
+
+    task(tbd::engine* eng)
+        : engine_(eng)
+        , running_(std::make_unique<std::atomic<bool>>(false))
+        , pending_(std::make_unique<std::atomic<bool>>(false))
+    {
+    }
+
+    virtual void top_half(event*)
+    {
+        // urgent work
+    }
+
+    virtual void bottom_half(event*)
+    {
+        // non-urgent, follow-up work
+    }
+
+    bool enter() noexcept
+    {
+        bool expected = false;
+        bool ok = running_->compare_exchange_strong(expected, true);
+        *pending_ = !ok;
+        return ok;
+    }
+
+    void exit() noexcept;
+
+    tbd::engine* engine() const noexcept
+    {
+        return engine_;
+    }
+
+    friend class event;
+    friend class engine;
+};
+
 class event
 {
   public:
     event(const event&) = delete;
     event& operator=(const event&) = delete;
     event(event&& rhs) noexcept
+        : fd_(rhs.fd_)
+        , task_(rhs.task_)
+        , flags_(rhs.flags_)
+        , ready_(std::move(rhs.ready_))
     {
-        *this = std::move(rhs);
+        rhs.fd_ = -1;
+        rhs.task_ = nullptr;
+        rhs.flags_ = DEFAULT_FLAGS;
     }
     event& operator=(event&& rhs) noexcept
     {
         using std::swap;
         if (this != &rhs) {
             swap(fd_, rhs.fd_);
+            swap(task_, rhs.task_);
+            swap(flags_, rhs.flags_);
+            swap(ready_, rhs.ready_);
         }
         return *this;
     }
 
-    virtual ~event()
+    virtual ~event() noexcept
     {
         detail::close(fd_);
     }
@@ -61,16 +125,6 @@ class event
     int handle() const noexcept
     {
         return fd_;
-    }
-
-    bool oneshot() const noexcept
-    {
-        return oneshot_;
-    }
-
-    void set_oneshot(bool set = true) noexcept
-    {
-        oneshot_ = set;
     }
 
     int flags() const noexcept
@@ -83,26 +137,40 @@ class event
         flags_ = newflag;
     }
 
-    virtual void top_half(bool)
+    bool ready() const noexcept
     {
-        // urgent work
+        return *ready_;
     }
 
-    virtual void bottom_half(bool)
-    {
-        // non-urgent, follow-up work
-    }
+    void async_wait(int timeout_ms = 0);
+    void async_timer(int timeout_ms);
+    void stop();
 
   protected:
-    int fd_ = -1;
-    uint32_t flags_ = EPOLLIN | EPOLLRDHUP | EPOLLPRI;
-    bool oneshot_ = false;
+    inline static constexpr uint32_t DEFAULT_FLAGS = EPOLLIN | EPOLLRDHUP | EPOLLPRI | EPOLLONESHOT;
 
-    event() noexcept = default;
-    explicit event(bool oneshot) noexcept
-        : oneshot_(oneshot)
+    int fd_ = -1;
+    tbd::task* task_ = nullptr;
+    uint32_t flags_ = DEFAULT_FLAGS;
+    std::unique_ptr<std::atomic<bool>> ready_;
+
+    explicit event(tbd::task* task) noexcept
+        : task_(task)
+        , ready_(std::make_unique<std::atomic<bool>>(false))
     {
     }
+
+    tbd::task* task() const noexcept
+    {
+        return task_;
+    }
+
+    void set_ready(bool set = true) noexcept
+    {
+        *ready_ = set;
+    }
+
+    friend class engine;
 };
 
 class engine
@@ -122,13 +190,14 @@ class engine
         };
 
       public:
+        // returns -1 if empty; wait indefinitely
         int next_expiry()
         {
             if (event_list_.empty()) {
                 return -1;
             }
 
-            int64_t remaining = std::max(event_list_.begin()->deadline_ms - now_ms(), 1L);
+            int64_t remaining = std::max(event_list_.begin()->deadline_ms - now_ms(), 0L);
             assert((remaining & 0x00000000ffffffffL) == remaining);
             return (int)remaining;
         }
@@ -161,8 +230,13 @@ class engine
             return ev;
         }
 
+        const timer_event* peek() const
+        {
+            return &(*event_list_.cbegin());
+        }
+
       private:
-        std::set<timer_event> event_list_;
+        std::multiset<timer_event> event_list_;
 
         static int64_t now_ms() noexcept
         {
@@ -212,7 +286,11 @@ class engine
         EV_ADD = 1,
         EV_DEL = 2,
         EV_TIM = 3,
+        EV_TERM,
     };
+
+    struct terminate
+    {};
 
     struct event_request
     {
@@ -227,6 +305,7 @@ class engine
     std::mutex mtx_;
     std::deque<event_request> requestq_;
     timer_list timerq_;
+    std::deque<event*> pendingq_;
 
   public:
     engine()
@@ -235,7 +314,7 @@ class engine
         if (epollfd_ < 0) {
             throw std::system_error(errno, std::generic_category());
         }
-        eventfd_ = ::eventfd(0, 0);
+        eventfd_ = ::eventfd(0, EFD_NONBLOCK);
         if (eventfd_ < 0) {
             throw std::system_error(errno, std::generic_category());
         }
@@ -246,14 +325,80 @@ class engine
         if (::epoll_ctl(epollfd_, EPOLL_CTL_ADD, eventfd_, &eev) < 0) {
             throw std::system_error(errno, std::generic_category());
         }
+        ++nevents_;
     }
 
-    virtual ~engine()
+    virtual ~engine() noexcept
     {
         detail::close(epollfd_);
         detail::close(eventfd_);
     }
 
+    void stop()
+    {
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        requestq_.emplace_back(event_request{EV_TERM, nullptr, 0});
+        eventfd_write(eventfd_, 1);
+    }
+
+    void run_next()
+    {
+        [[maybe_unused]] thread_local bool changed_ = true;
+
+    again:
+        struct epoll_event eev[nevents_] = {};
+        int nfds = ::epoll_wait(epollfd_, eev, nevents_, timerq_.next_expiry());
+        if (nfds < 0) {
+            if (errno == EINTR) {
+                goto again;
+            }
+            throw std::system_error(errno, std::generic_category());
+        }
+
+        if (nfds == 0) {
+            handle_timeout();
+
+        } else {
+            assert(nfds >= 1);
+            [[maybe_unused]] thread_local int ndups_ = 0;
+            [[maybe_unused]] thread_local std::string prev_log_;
+            std::string log;
+            log.reserve(256);
+            for (auto i = 0; i < nfds; ++i) {
+                if (eev[i].data.ptr == this) {
+                    continue;  // skip
+                }
+
+                handle_event((event*)eev[i].data.ptr);
+#ifdef EVENT_ENGINE_VERBOSE
+                log += "fd=" + std::to_string(((event*)eev[i].data.ptr)->handle()) + " ";
+#endif
+            }
+#ifdef EVENT_ENGINE_VERBOSE
+            ndups_ = (changed_ || log != prev_log_) ? 0 : ndups_ + 1;
+            if (!log.empty() && ndups_ < 3) {
+                printf(" *** epoll wakeup (n=%d,c=%d): %s***\n", nfds, changed_, log.c_str());
+            }
+            prev_log_ = log;
+#endif
+        }
+
+        changed_ = handle_request();
+        flush_pendings();
+    }
+
+    void run_loop()
+    {
+        try {
+            while (true) {
+                run_next();
+            }
+        } catch (const terminate&) {
+            // nop
+        }
+    }
+
+  protected:
     void register_event(event* ev, int timeout_ms = 0)
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
@@ -275,57 +420,15 @@ class engine
         eventfd_write(eventfd_, 1);
     }
 
-    void run_next()
+    void notify()
     {
-        [[maybe_unused]] bool changed = update_interests();
-
-        struct epoll_event eev[nevents_] = {};
-        int nfds = ::epoll_wait(epollfd_, eev, nevents_, timerq_.next_expiry());
-        if (nfds < 0) {
-            throw std::system_error(errno, std::generic_category());
-        }
-
-        if (nfds == 0) {
-            handle_timeout();
-            return;
-        }
-
-        assert(nfds >= 1);
-        [[maybe_unused]] thread_local std::string prev_log_;
-        [[maybe_unused]] thread_local int ndups_ = 0;
-        std::string log;
-        log.reserve(256);
-        for (auto i = 0; i < nfds; ++i) {
-            if (eev[i].data.ptr == this) {
-                continue;  // ignore
-            }
-
-            handle_event(eev[i].data.ptr);
-#ifdef EVENT_ENGINE_VERBOSE
-            log += "fd=" + std::to_string(((event*)eev[i].data.ptr)->handle()) + " ";
-#endif
-        }
-#ifdef EVENT_ENGINE_VERBOSE
-        ndups_ = (changed || log != prev_log_) ? 0 : ndups_ + 1;
-        if (!log.empty() && ndups_ < 3) {
-            printf(" *** epoll wakeup (n=%d,c=%d): %s***\n", nfds, changed, log.c_str());
-        }
-        prev_log_ = log;
-#endif
+        eventfd_write(eventfd_, 1);
     }
 
-    void run_loop()
-    {
-        while (true) {
-            run_next();
-        }
-    }
-
-  protected:
     /**
      * add new / delete existing event
      */
-    bool update_interests()
+    bool handle_request()
     {
         bool changed = false;
         std::unique_lock<decltype(mtx_)> lk(mtx_);
@@ -336,34 +439,36 @@ class engine
 
             if (req.op == EV_ADD) {
                 add_event(req.ev, req.timeout_ms);
+                req.ev->set_ready(false);
             } else if (req.op == EV_DEL) {
                 delete_event(req.ev);
+                req.ev->set_ready(false);
             } else if (req.op == EV_TIM) {
 #ifdef EVENT_ENGINE_VERBOSE
                 printf(" *** timer.add: fd=%d, ev=%p, timeout_ms=%d ***\n", req.ev->handle(),
                        req.ev, req.timeout_ms);
 #endif
                 timerq_.add(req.ev, req.timeout_ms);
+                req.ev->set_ready(false);
+            } else if (req.op == EV_TERM) {
+                throw terminate{};
             } else {
                 // ignore
             }
         }
 
-        if (changed) {
-            eventfd_t value;
-            eventfd_read(eventfd_, &value);
-        }
+        eventfd_t value;
+        eventfd_read(eventfd_, &value);
         return changed;
     }
 
     void add_event(event* ev, int timeout_ms = 0)
     {
 #ifdef EVENT_ENGINE_VERBOSE
-        printf(" *** add_event: fd=%d, ev=%p, timeout_ms=%d, oneshot=%d ***\n", ev->handle(), ev,
-               timeout_ms, ev->oneshot());
+        printf(" *** add_event: fd=%d, ev=%p, timeout_ms=%d ***\n", ev->handle(), ev, timeout_ms);
 #endif
         struct epoll_event eev = {};
-        eev.events = ev->flags() | (ev->oneshot() ? EPOLLONESHOT : 0U);
+        eev.events = ev->flags();
         eev.data.ptr = ev;
         int op = EPOLL_CTL_ADD;
     again:
@@ -401,41 +506,144 @@ class engine
         }
     }
 
+    void flush_pendings()
+    {
+        std::string log;
+        log.reserve(256);
+        [[maybe_unused]] auto before = pendingq_.size();
+        for (auto it = pendingq_.begin(); it != pendingq_.end();) {
+            log += "fd=" + std::to_string((*it)->handle());
+            if (exec_bh(*it)) {
+                it = pendingq_.erase(it);
+                log += "(o) ";
+            } else {
+                ++it;
+                log += "(x) ";
+            }
+        }
+#ifdef EVENT_ENGINE_VERBOSE
+        auto after = pendingq_.size();
+        if (before > 0 || before != after) {
+            printf(" *** flush_pendings: #pend %lu -> %lu, %s***\n", before, after, log.c_str());
+        }
+#endif
+    }
+
     /**
      * event / timer callback
      */
     void handle_timeout()
     {
-        auto* ev = (event*)timerq_.pop();
-        if (ev->oneshot()) {
+        int n = 0;
+        std::string log;
+        log.reserve(256);
+        auto first_deadline = timerq_.peek()->deadline_ms;
+        while (timerq_.peek()->deadline_ms == first_deadline) {
+            auto* ev = (event*)timerq_.pop();
             delete_event(ev);
-        }
-
-        ev->top_half(true);
+            ev->task()->top_half(ev);
+            ++n;
+            log += "fd=" + std::to_string(ev->handle()) + " ";
+            if (!exec_bh(ev)) {
 #ifdef EVENT_ENGINE_VERBOSE
-        printf(" *** event timed out: fd=%d ***\n", ev->handle());
+                printf(" *** handle_timeout: exec_bh failed, fd=%d, ev=%p ***\n", ev->handle(), ev);
 #endif
-        exec_bh(ev, true);
+                pendingq_.emplace_back(ev);
+            }
+        }
+#ifdef EVENT_ENGINE_VERBOSE
+        printf(" *** event timed out (n=%d): %s***\n", n, log.c_str());
+#endif
     }
 
-    void handle_event(void* ptr)
+    void handle_event(event* ev)
     {
-        auto* ev = (event*)ptr;
-        if (ev->oneshot()) {
-            delete_event(ev);
-        } else {
+        if (ev->flags() & EPOLLONESHOT) {
             timerq_.remove(ev);
+        } else {
+            delete_event(ev);
+        }
+        ev->set_ready();
+        ev->task()->top_half(ev);
+        if (!exec_bh(ev)) {
+#ifdef EVENT_ENGINE_VERBOSE
+            printf(" *** handle_event: exec_bh failed, fd=%d, ev=%p ***\n", ev->handle(), ev);
+#endif
+        }
+    }
+
+    virtual bool exec_bh(event* ev)
+    {
+        ev->task()->bottom_half(ev);
+        return true;
+    }
+
+    // helpers
+    static bool task_enter(event* ev) noexcept
+    {
+        return ev->task()->enter();
+    }
+
+    static void task_exit(event* ev) noexcept
+    {
+        ev->task()->exit();
+    }
+
+    static void task_execute(event* ev)
+    {
+        ev->task()->bottom_half(ev);
+        ev->task()->exit();
+    }
+
+    friend class task;
+    friend class event;
+};
+
+void task::exit() noexcept
+{
+    *running_ = false;
+    bool expected = false;
+    if (!pending_->compare_exchange_strong(expected, false)) {
+#ifdef EVENT_ENGINE_VERBOSE
+        printf(" *** task::exit: notify to engine ***\n");
+#endif
+        engine_->notify();
+    }
+}
+
+void event::async_wait(int timeout_ms)
+{
+    task_->engine()->register_event(this, timeout_ms);
+}
+
+void event::async_timer(int timeout_ms)
+{
+    task_->engine()->register_timer(this, timeout_ms);
+}
+
+void event::stop()
+{
+    task_->engine()->deregister(this);
+}
+
+/**********************************************************************
+// multithread example
+#include "thread_pool.hpp"
+struct multithreaded_engine : public engine
+{
+    thread_pool pool_;
+
+    bool exec_bh(event* ev) override
+    {
+        if (!task_enter(ev)) {
+            return false;
         }
 
-        ev->top_half(false);
-        exec_bh(ev, false);
-    }
-
-    virtual void exec_bh(event* ev, bool timedout)
-    {
-        ev->bottom_half(timedout);
+        pool_.submit([ev] { task_execute(ev); });
+        return true;
     }
 };
+***********************************************************************/
 
 }  // namespace tbd
 
