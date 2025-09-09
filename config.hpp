@@ -11,19 +11,15 @@ namespace tbd {
 
 class config
 {
-    using value_type = std::variant<std::string, int, bool>;
-
-    std::unordered_map<std::string, value_type> config_;
-
   public:
-    config() = default;
+    config() noexcept = default;
     explicit config(const std::string& file)
     {
         parse(file);
     }
 
     template <typename T>
-    T get(const std::string& key)
+    T get(const std::string& key) const
     {
         auto it = config_.find(key);
         if (it != config_.end()) {
@@ -35,6 +31,9 @@ class config
     }
 
   private:
+    using value_type = std::variant<std::string, int, bool>;
+    std::unordered_map<std::string, value_type> config_;
+
     void parse(const std::string& file)
     {
         std::ifstream ifs(file);
