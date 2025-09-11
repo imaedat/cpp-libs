@@ -2,6 +2,7 @@
 #define CONFIG_HPP_
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -19,7 +20,7 @@ class config
     }
 
     template <typename T>
-    T get(const std::string& key) const
+    T get(const std::string& key, T defval = {}) const
     {
         auto it = config_.find(key);
         if (it != config_.end()) {
@@ -27,7 +28,7 @@ class config
                 return *val;
             }
         }
-        return T{};
+        return defval;
     }
 
   private:
@@ -43,58 +44,61 @@ class config
 
         std::string line;
         while (std::getline(ifs, line)) {
-            line = trim(line);
+            const auto& trimmed = trim(line);
 
-            if (line.empty() || line[0] == '#') {
+            if (trimmed.empty() || trimmed[0] == '#') {
                 continue;
             }
 
-            auto eq_pos = line.find('=');
-            if (eq_pos == std::string::npos) {
+            auto eq_pos = trimmed.find('=');
+            if (eq_pos == std::string_view::npos) {
                 continue;
             }
 
-            config_.emplace(trim(line.substr(0, eq_pos)),
-                            parse_value(trim(line.substr(eq_pos + 1))));
+            config_.emplace(trim(trimmed.substr(0, eq_pos)),
+                            parse_value(trim(trimmed.substr(eq_pos + 1))));
         }
     }
 
-    std::string trim(const std::string& s)
+    template <typename S>
+    std::string_view trim(const S& s)
     {
         auto begin = s.find_first_not_of(" \t\r\n");
-        if (begin == std::string::npos) {
+        if (begin == S::npos) {
             return "";
         }
         auto end = s.find_last_not_of(" \t\r\n");
-        return s.substr(begin, end - begin + 1);
+        return std::string_view(&s[begin], end - begin + 1);
     }
 
-    value_type parse_value(const std::string& sval)
+    value_type parse_value(const std::string_view& sval)
     {
         // quoted
         if (sval.size() >= 2 && sval.front() == '"' && sval.back() == '"') {
-            return sval.substr(1, sval.size() - 2);
+            return std::string(&sval[1], sval.size() - 2);
         }
 
         // bool
-        auto bval = sval;
-        std::transform(bval.begin(), bval.end(), bval.begin(), ::tolower);
-        if (bval == "true") {
-            return true;
-        }
-        if (bval == "false") {
-            return false;
+        if (sval.size() == 4 || sval.size() == 5) {
+            std::string bval(sval);
+            std::transform(bval.begin(), bval.end(), bval.begin(), ::tolower);
+            if (bval == "true") {
+                return true;
+            }
+            if (bval == "false") {
+                return false;
+            }
         }
 
         // int
         char* endptr = nullptr;
-        auto ival = ::strtol(sval.c_str(), &endptr, 10);
+        auto ival = ::strtol(sval.data(), &endptr, 0);
         if (*endptr == '\0') {
             return static_cast<int>(ival);
         }
 
         // string
-        return sval;
+        return std::string(sval);
     }
 };
 
