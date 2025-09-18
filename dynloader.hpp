@@ -12,6 +12,48 @@ namespace tbd {
 
 class dynloader
 {
+    struct string_like_hash
+    {
+        using is_transparent = void;
+        size_t operator()(const std::string& s) const noexcept
+        {
+            return std::hash<std::string>{}(s);
+        }
+        size_t operator()(std::string_view sv) const noexcept
+        {
+            return std::hash<std::string_view>{}(sv);
+        }
+        size_t operator()(const char* s) const noexcept
+        {
+            return std::hash<std::string_view>{}(s);
+        }
+    };
+
+    struct string_like_equal
+    {
+        using is_transparent = void;
+        bool operator()(const std::string& s1, const std::string& s2) const noexcept
+        {
+            return s1 == s2;
+        }
+        bool operator()(const std::string& s1, std::string_view s2) const noexcept
+        {
+            return s1 == s2;
+        }
+        bool operator()(std::string_view s1, const std::string& s2) const noexcept
+        {
+            return s1 == s2;
+        }
+        bool operator()(const std::string& s1, const char* s2) const noexcept
+        {
+            return s1 == s2;
+        }
+        bool operator()(const char* s1, const std::string& s2) const noexcept
+        {
+            return s1 == s2;
+        }
+    };
+
     class libfunc
     {
       public:
@@ -77,7 +119,7 @@ class dynloader
 
   private:
     void* handle_ = nullptr;
-    std::unordered_map<std::string, libfunc> cache_;
+    std::unordered_map<std::string, libfunc, string_like_hash, string_like_equal> cache_;
 
     void release() noexcept
     {
