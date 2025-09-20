@@ -81,7 +81,6 @@ class coroutine_env_tmpl
         coroutine& operator=(coroutine&& rhs) noexcept
         {
             if (this != &rhs) {
-                fn_.swap(rhs.fn_);
                 fn_ = std::move(rhs.fn_);
                 stack_size_ = std::exchange(rhs.stack_size_, 0);
                 stack_ = std::exchange(rhs.stack_, nullptr);
