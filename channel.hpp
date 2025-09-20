@@ -49,24 +49,21 @@ class receiver
 
     // movable
     receiver(receiver&& rhs) noexcept
+        : fd_(std::exchange(rhs.fd_, -1))
     {
-        *this = std::move(rhs);
     }
     receiver& operator=(receiver&& rhs) noexcept
     {
-        using std::swap;
         if (this != &rhs) {
-            swap(fd_, rhs.fd_);
+            close_();
+            fd_ = std::exchange(rhs.fd_, -1);
         }
         return *this;
     }
 
-    ~receiver()
+    ~receiver() noexcept
     {
-        if (fd_ >= 0) {
-            ::close(fd_);
-            fd_ = -1;
-        }
+        close_();
     }
 
     std::optional<T> recv() const
@@ -84,7 +81,7 @@ class receiver
         throw std::system_error(errno, std::generic_category());
     }
 
-    int native_handle() const
+    int native_handle() const noexcept
     {
         return fd_;
     }
@@ -94,6 +91,14 @@ class receiver
     explicit receiver(int fd) noexcept
         : fd_(fd)
     {
+    }
+
+    void close_() noexcept
+    {
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
     }
 
     friend std::pair<sender<T>, receiver<T>> new_channel<T>();
@@ -128,10 +133,8 @@ class sender
     {
         if (this != &rhs) {
             dec_ref();
-            refcnt_ = rhs.refcnt_;
-            fd_ = rhs.fd_;
-            rhs.refcnt_ = nullptr;
-            rhs.fd_ = -1;
+            refcnt_ = std::exchange(rhs.refcnt_, nullptr);
+            fd_ = std::exchange(rhs.fd_, -1);
         }
         return *this;
     }
@@ -161,7 +164,7 @@ class sender
     {
     }
 
-    void dec_ref()
+    void dec_ref() noexcept
     {
         if (refcnt_ && refcnt_->fetch_sub(1) == 1) {
             ::close(fd_);

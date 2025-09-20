@@ -30,7 +30,7 @@ class object_pool
     {
     }
 
-    ~object_pool() = default;
+    ~object_pool() noexcept = default;
 
     std::shared_ptr<T> acquire(long wait_ms = -1)
     {

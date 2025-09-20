@@ -27,24 +27,21 @@ class signalfd
     signalfd(const signalfd&) = delete;
     signalfd& operator=(const signalfd&) = delete;
     signalfd(signalfd&& rhs) noexcept
+        : fd_(std::exchange(rhs.fd_, -1))
     {
-        *this = std::move(rhs);
     }
     signalfd& operator=(signalfd&& rhs) noexcept
     {
-        using std::swap;
         if (this != &rhs) {
-            swap(fd_, rhs.fd_);
+            close_();
+            fd_ = std::exchange(rhs.fd_, -1);
         }
         return *this;
     }
 
-    ~signalfd()
+    ~signalfd() noexcept
     {
-        if (fd_ >= 0) {
-            ::close(fd_);
-            fd_ = -1;
-        }
+        close_();
     }
 
     int handle() const noexcept
@@ -76,6 +73,14 @@ class signalfd
 
   private:
     int fd_ = -1;
+
+    void close_() noexcept
+    {
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
 };
 
 }  // namespace tbd

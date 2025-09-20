@@ -34,24 +34,28 @@ class message_queue
     message_queue(const message_queue&) = delete;
     message_queue& operator=(const message_queue&) = delete;
     message_queue(message_queue&& rhs) noexcept
+        : eventfd_(std::exchange(rhs.eventfd_, -1))
+        , mq_(std::move(rhs.mq_))
+        , queue_mtx_(std::move(rhs.queue_mtx_))
+#ifdef MESSAGE_QUEUE_MULTIPLE_READERS
+        , reader_mtx_(std::move(rhs.reader_mtx_))
+#endif
     {
-        *this = std::move(rhs);
     }
     message_queue& operator=(message_queue&& rhs) noexcept
     {
-        using std::swap;
         if (this != &rhs) {
-            swap(eventfd_, rhs.eventfd_);
-            swap(mq_, rhs.mq_);
-            queue_mtx_.swap(rhs.queue_mtx_);
+            eventfd_ = std::exchange(rhs.eventfd_, -1);
+            mq_ = std::move(rhs.mq_);
+            queue_mtx_ = std::move(rhs.queue_mtx_);
 #ifdef MESSAGE_QUEUE_MULTIPLE_READERS
-            reader_mtx_.swap(rhs.reader_mtx_);
+            reader_mtx_ = std::move(rhs.reader_mtx_);
 #endif
         }
         return *this;
     }
 
-    ~message_queue()
+    ~message_queue() noexcept
     {
         if (eventfd_ >= 0) {
             ::close(eventfd_);

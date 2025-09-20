@@ -47,7 +47,7 @@ class mmapper
     mmapper& operator=(mmapper&& rhs) noexcept
     {
         if (this != &rhs) {
-            cleanup();
+            unmap();
             fd_ = std::exchange(rhs.fd_, -1);
             statbuf_ = std::exchange(rhs.statbuf_, {});
             area_ = std::exchange(rhs.area_, nullptr);
@@ -55,9 +55,9 @@ class mmapper
         return *this;
     }
 
-    ~mmapper()
+    ~mmapper() noexcept
     {
-        cleanup();
+        unmap();
     }
 
     const void* data() const noexcept
@@ -75,7 +75,7 @@ class mmapper
     struct stat statbuf_ = {};
     void* area_ = nullptr;
 
-    void cleanup() noexcept
+    void unmap() noexcept
     {
         if (area_) {
             ::munmap(area_, statbuf_.st_size);

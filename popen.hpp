@@ -44,7 +44,7 @@ class popen
         return *this;
     }
 
-    ~popen()
+    ~popen() noexcept
     {
         if (fp_) {
             ::pclose(fp_);
@@ -52,14 +52,14 @@ class popen
         }
     }
 
-    std::optional<std::string> getline()
+    std::optional<std::string> getline() const noexcept
     {
         char buf[BUFSIZ] = {0};
         if (!::fgets(buf, BUFSIZ, fp_)) {
             return std::nullopt;
         }
 
-        auto len = strlen(buf);
+        auto len = ::strlen(buf);
         if (len > 0 && buf[len - 1] == '\n') {
             buf[len - 1] = '\0';
         }
@@ -70,7 +70,7 @@ class popen
     FILE* fp_ = nullptr;
 
     template <typename T>
-    std::string to_string(const T& value)
+    std::string to_string(const T& value) const
     {
         if constexpr (std::is_convertible_v<T, std::string_view>) {
             return std::string(std::string_view(value));

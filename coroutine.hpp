@@ -69,19 +69,26 @@ class coroutine_env_tmpl
         coroutine(const coroutine&) = delete;
         coroutine& operator=(const coroutine&) = delete;
         coroutine(coroutine&& rhs) noexcept
+            : fn_(std::move(rhs.fn_))
+            , stack_size_(std::exchange(rhs.stack_size_, 0))
+            , stack_(std::exchange(rhs.stack_, nullptr))
+            , finished_(std::exchange(rhs.finished_, false))
+            , env_(std::exchange(rhs.env_, nullptr))
+            , uctx_(std::exchange(rhs.uctx_, {}))
+            , value_(std::move(value_))
         {
-            *this = std::move(rhs);
         }
         coroutine& operator=(coroutine&& rhs) noexcept
         {
-            using std::swap;
             if (this != &rhs) {
                 fn_.swap(rhs.fn_);
-                stack_size_ = rhs.stack_size_;
-                swap(stack_, rhs.stack_);
-                swap(finished_, rhs.finished_);
-                swap(env_, rhs.env_);
-                uctx_ = rhs.uctx_;
+                fn_ = std::move(rhs.fn_);
+                stack_size_ = std::exchange(rhs.stack_size_, 0);
+                stack_ = std::exchange(rhs.stack_, nullptr);
+                finished_ = std::exchange(rhs.finished_, false);
+                env_ = std::exchange(rhs.env_, nullptr);
+                uctx_ = std::exchange(rhs.uctx_, {});
+                value_ = std::move(value_);
                 ::makecontext(&uctx_, (void (*)()) & entry, 1, this);
                 // 1st argument of `entry`
                 // uctx_.uc_mcontext.gregs[REG_RDI] = (greg_t)this;
@@ -89,7 +96,7 @@ class coroutine_env_tmpl
             return *this;
         }
 
-        ~coroutine()
+        ~coroutine() noexcept
         {
             if (stack_) {
                 ::mprotect(stack_, ::sysconf(_SC_PAGE_SIZE), PROT_WRITE);
@@ -171,23 +178,26 @@ class coroutine_env_tmpl
     coroutine_env_tmpl(const coroutine_env_tmpl&) = delete;
     coroutine_env_tmpl& operator=(const coroutine_env_tmpl&) = delete;
     coroutine_env_tmpl(coroutine_env_tmpl&& rhs) noexcept
+        : uctx_(std::exchange(rhs.uctx_, {}))
+        , current_(std::exchange(rhs.current_, nullptr))
+        , last_value_(std::move(last_value_))
     {
-        *this = std::move(rhs);
+        ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
+        ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
     }
     coroutine_env_tmpl& operator=(coroutine_env_tmpl&& rhs) noexcept
     {
-        using std::swap;
         if (this != &rhs) {
             ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
             ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
-            uctx_ = rhs.uctx_;
-            swap(current_, rhs.current_);
-            swap(last_value_, rhs.last_value_);
+            uctx_ = std::exchange(rhs.uctx_, {});
+            current_ = std::exchange(rhs.current_, nullptr);
+            last_value_ = std::move(last_value_);
         }
         return *this;
     }
 
-    ~coroutine_env_tmpl()
+    ~coroutine_env_tmpl() noexcept
     {
         ::memset(magic_, 0, sizeof(magic_));
     }

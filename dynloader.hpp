@@ -85,22 +85,22 @@ class dynloader
     dynloader& operator=(const dynloader&) = delete;
     dynloader(dynloader&& rhs) noexcept
         : handle_(std::exchange(rhs.handle_, nullptr))
-        , cache_(std::exchange(rhs.cache_, {}))
+        , cache_(std::move(rhs.cache_))
     {
     }
     dynloader& operator=(dynloader&& rhs) noexcept
     {
         if (this != &rhs) {
-            release();
+            close_();
             handle_ = std::exchange(rhs.handle_, nullptr);
-            cache_ = std::exchange(rhs.cache_, {});
+            cache_ = std::move(rhs.cache_);
         }
         return *this;
     }
 
-    ~dynloader()
+    ~dynloader() noexcept
     {
-        release();
+        close_();
     }
 
     const libfunc& operator[](std::string_view fname)
@@ -121,7 +121,7 @@ class dynloader
     void* handle_ = nullptr;
     std::unordered_map<std::string, libfunc, string_like_hash, string_like_equal> cache_;
 
-    void release() noexcept
+    void close_() noexcept
     {
         if (handle_) {
             ::dlclose(handle_);

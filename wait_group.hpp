@@ -10,11 +10,12 @@ namespace tbd {
 class wait_group
 {
   public:
-    explicit wait_group(int initial = 0)
+    explicit wait_group(int initial = 0) noexcept
         : counter_(initial)
-    {}
+    {
+    }
 
-    ~wait_group() = default;
+    ~wait_group() noexcept = default;
 
     void add(int delta = 1)
     {

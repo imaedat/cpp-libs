@@ -18,19 +18,18 @@ class defer_block
     defer_block(const defer_block&) = delete;
     defer_block& operator=(const defer_block&) = delete;
     defer_block(defer_block&& rhs) noexcept
+        : fn_(std::move(rhs.fn_))
     {
-        *this = std::move(rhs);
     }
     defer_block& operator=(defer_block&& rhs) noexcept
     {
-        using std::swap;
         if (this != &rhs) {
-            swap(fn_, rhs.fn_);
+            fn_ = std::move(rhs.fn_);
         }
         return *this;
     }
 
-    ~defer_block()
+    ~defer_block() noexcept
     {
         try {
             fn_();

@@ -93,7 +93,7 @@ class thread_pool
     std::condition_variable cv_caller_;
 #endif
 
-    void executor(void)
+    void executor(void) noexcept
     {
         std::unique_lock<decltype(mtx_)> ul(mtx_);
 

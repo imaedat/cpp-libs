@@ -12,7 +12,7 @@ namespace tbd {
 
 class pipe
 {
-    static void close_(int& fd)
+    static void close_(int& fd) noexcept
     {
         if (fd >= 0) {
             ::close(fd);
@@ -43,7 +43,7 @@ class pipe
         return *this;
     }
 
-    ~pipe()
+    ~pipe() noexcept
     {
         close_(fds_[0]);
         close_(fds_[1]);
@@ -67,7 +67,7 @@ class pipe
             return *this;
         }
 
-        ~writer()
+        ~writer() noexcept
         {
             close_(wfd_);
         }
@@ -77,7 +77,7 @@ class pipe
             return wfd_;
         }
 
-        size_t write(const void* buf, size_t size)
+        size_t write(const void* buf, size_t size) const
         {
             auto nwritten = ::write(wfd_, buf, size);
             if (nwritten < 0) {
@@ -86,7 +86,7 @@ class pipe
             return nwritten;
         }
 
-        size_t write(std::string_view data)
+        size_t write(std::string_view data) const
         {
             return write(data.data(), data.size());
         }
@@ -123,7 +123,7 @@ class pipe
             return *this;
         }
 
-        ~reader()
+        ~reader() noexcept
         {
             close_(rfd_);
         }
@@ -133,7 +133,7 @@ class pipe
             return rfd_;
         }
 
-        size_t read(void* buf, size_t size)
+        size_t read(void* buf, size_t size) const
         {
             auto nread = ::read(rfd_, buf, size);
             if (nread < 0) {
@@ -142,7 +142,7 @@ class pipe
             return nread;
         }
 
-        std::string read()
+        std::string read() const
         {
             constexpr size_t BUFSZ = 1024;
             char buf[BUFSZ] = {0};

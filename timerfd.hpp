@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <system_error>
+#include <utility>
 
 namespace tbd {
 
@@ -31,24 +32,21 @@ class timerfd
     timerfd(const timerfd&) = delete;
     timerfd& operator=(const timerfd&) = delete;
     timerfd(timerfd&& rhs) noexcept
+        : fd_(std::exchange(rhs.fd_, -1))
     {
-        *this = std::move(rhs);
     }
     timerfd& operator=(timerfd&& rhs) noexcept
     {
-        using std::swap;
         if (this != &rhs) {
-            swap(fd_, rhs.fd_);
+            close_();
+            fd_ = std::exchange(rhs.fd_, -1);
         }
         return *this;
     }
 
-    ~timerfd()
+    ~timerfd() noexcept
     {
-        if (fd_ >= 0) {
-            ::close(fd_);
-            fd_ = -1;
-        }
+        close_();
     }
 
     int handle() const noexcept
@@ -56,7 +54,7 @@ class timerfd
         return fd_;
     }
 
-    void set_nonblock(bool set = true)
+    void set_nonblock(bool set = true) const
     {
         int ret = ::fcntl(fd_, F_GETFL, nullptr);
         if (ret >= 0) {
@@ -68,7 +66,7 @@ class timerfd
         throw std::system_error(errno, std::generic_category(), "timerfd::set_nonblock: fcntl");
     }
 
-    void settime(long after_ms, bool cyclic = false)
+    void settime(long after_ms, bool cyclic = false) const
     {
         static constexpr long ns_scale = 1000 * 1000 * 1000;
 
@@ -80,33 +78,25 @@ class timerfd
             sec = nsec / ns_scale;
             nsec %= ns_scale;
         }
-        // clang-format off
-        struct itimerspec t{{(cyclic ? sec : 0), (cyclic ? nsec : 0)}, {sec, nsec}};
-        // clang-format on
+        struct itimerspec t = {{(cyclic ? sec : 0), (cyclic ? nsec : 0)}, {sec, nsec}};
         if (::timerfd_settime(fd_, 0, &t, nullptr) < 0) {
             throw std::system_error(errno, std::generic_category(),
                                     "timerfd::settime: timerfd_settime");
         }
     }
 
-    void cancel()
+    void cancel() const
     {
         clear();
 
-        struct itimerspec t
-        {
-            {0, 0},
-            {
-                0, 0
-            }
-        };
+        struct itimerspec t = {{0, 0}, {0, 0}};
         if (::timerfd_settime(fd_, 0, &t, nullptr) < 0) {
             throw std::system_error(errno, std::generic_category(),
                                     "timerfd::cancel: timerfd_settime");
         }
     }
 
-    void clear() noexcept
+    void clear() const noexcept
     {
         struct pollfd fds;
         fds.fd = fd_;
@@ -121,6 +111,14 @@ class timerfd
 
   private:
     int fd_ = -1;
+
+    void close_() noexcept
+    {
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
 };
 
 }  // namespace tbd

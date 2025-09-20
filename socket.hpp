@@ -52,7 +52,7 @@ namespace tbd {
 class resolver
 {
   public:
-    static resolver& get_instance()
+    static resolver& get_instance() noexcept
     {
         static resolver instance_;
         return instance_;
@@ -61,7 +61,7 @@ class resolver
     /**
      * DNS forward lookup
      */
-    int64_t lookup(std::string_view host)
+    int64_t lookup(std::string_view host) const noexcept
     {
         static const std::regex re{
             "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"};
@@ -102,7 +102,7 @@ class resolver
     /**
      * DNS reverse lookup
      */
-    std::string reverse_lookup(std::string_view ipaddr)
+    std::string reverse_lookup(std::string_view ipaddr) const noexcept
     {
         auto it = std::find_if(host_addrs_.cbegin(), host_addrs_.cend(),
                                [&ipaddr](const auto& kv) { return kv.second == ipaddr; });
@@ -124,7 +124,7 @@ class resolver
         return host;
     }
 
-    void clear_entries()
+    void clear_entries() noexcept
     {
         host_addrs_.clear();
     }
@@ -201,7 +201,7 @@ class socket_base
         return raw_fd_;
     }
 
-    int set_nonblock(bool set = true)
+    int set_nonblock(bool set = true) const
     {
         int old_flags = SYSCALL(::fcntl, native_handle(), F_GETFL);
         if ((set && !(old_flags & O_NONBLOCK)) || (!set && (old_flags & O_NONBLOCK))) {
@@ -211,7 +211,7 @@ class socket_base
         return old_flags;
     }
 
-    void bind(std::string_view ipaddr, uint16_t port = 0)
+    void bind(std::string_view ipaddr, uint16_t port = 0) const
     {
         struct sockaddr_in addr;
         addr.sin_family = AF_INET;
@@ -220,12 +220,12 @@ class socket_base
         SYSCALL(::bind, native_handle(), (const struct sockaddr*)&addr, sizeof(addr));
     }
 
-    void setsockopt(int so_optname, int val)
+    void setsockopt(int so_optname, int val) const
     {
         setsockopt_(SOL_SOCKET, so_optname, val);
     }
 
-    void settcpopt(int tcp_optname, int val)
+    void settcpopt(int tcp_optname, int val) const
     {
         setsockopt_(IPPROTO_TCP, tcp_optname, val);
     }
@@ -282,7 +282,7 @@ class socket_base
     }
 
   private:
-    void setsockopt_(int level, int optname, int val)
+    void setsockopt_(int level, int optname, int val) const
     {
         SYSCALL(::setsockopt, native_handle(), level, optname, &val, (socklen_t)sizeof(val));
     }
@@ -319,15 +319,19 @@ class io_socket : virtual public socket_base
         return *this;
     }
 
-    virtual std::error_code recv_nb(void* buf, size_t size, size_t* nrecv = nullptr) = 0;
+    virtual std::error_code recv_nb(void* buf, size_t size,
+                                    size_t* nrecv = nullptr) const noexcept = 0;
     virtual std::error_code recv_some(void* buf, size_t size, int timeout_ms,
-                                      size_t* nrecv = nullptr) = 0;
-    virtual std::error_code recv_some(void* buf, size_t size, size_t* nrecv = nullptr) = 0;
+                                      size_t* nrecv = nullptr) const noexcept = 0;
+    virtual std::error_code recv_some(void* buf, size_t size,
+                                      size_t* nrecv = nullptr) const noexcept = 0;
     virtual std::error_code recv(void* buf, size_t size, int timeout_ms,
-                                 size_t* nrecv = nullptr) = 0;
-    virtual std::error_code recv(void* buf, size_t size, size_t* nrecv = nullptr) = 0;
-    virtual std::error_code send(const void* buf, size_t size, size_t* nsent = nullptr) = 0;
-    virtual std::error_code send(std::string_view msg, size_t* nsent = nullptr) = 0;
+                                 size_t* nrecv = nullptr) const noexcept = 0;
+    virtual std::error_code recv(void* buf, size_t size,
+                                 size_t* nrecv = nullptr) const noexcept = 0;
+    virtual std::error_code send(const void* buf, size_t size,
+                                 size_t* nsent = nullptr) const noexcept = 0;
+    virtual std::error_code send(std::string_view msg, size_t* nsent = nullptr) const noexcept = 0;
 
   protected:
     io_socket() noexcept = default;
@@ -406,7 +410,7 @@ class io_socket_tmpl : virtual public io_socket
         return *this;
     }
 
-    std::error_code recv_nb(void* buf, size_t size, size_t* nrecv = nullptr) override
+    std::error_code recv_nb(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept override
     {
         auto n = read_fn_(io_handle(), buf, size);
         if (nrecv) {
@@ -416,7 +420,7 @@ class io_socket_tmpl : virtual public io_socket
     }
 
     std::error_code recv_some(void* buf, size_t size, int timeout_ms,
-                              size_t* nrecv = nullptr) override
+                              size_t* nrecv = nullptr) const noexcept override
     {
         if (!wait_readable(timeout_ms)) {
             return std::error_code(ETIMEDOUT, std::generic_category());
@@ -424,12 +428,14 @@ class io_socket_tmpl : virtual public io_socket
         return recv_nb(buf, size, nrecv);
     }
 
-    std::error_code recv_some(void* buf, size_t size, size_t* nrecv = nullptr) override
+    std::error_code recv_some(void* buf, size_t size,
+                              size_t* nrecv = nullptr) const noexcept override
     {
         return recv_some(buf, size, -1, nrecv);
     }
 
-    std::error_code recv(void* buf, size_t size, int timeout_ms, size_t* nrecv = nullptr) override
+    std::error_code recv(void* buf, size_t size, int timeout_ms,
+                         size_t* nrecv = nullptr) const noexcept override
     {
         using namespace std::chrono;
 
@@ -458,12 +464,13 @@ class io_socket_tmpl : virtual public io_socket
         return ec;
     }
 
-    std::error_code recv(void* buf, size_t size, size_t* nrecv = nullptr) override
+    std::error_code recv(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept override
     {
         return recv(buf, size, -1, nrecv);
     }
 
-    std::error_code send(const void* buf, size_t size, size_t* nsent = nullptr) override
+    std::error_code send(const void* buf, size_t size,
+                         size_t* nsent = nullptr) const noexcept override
     {
         auto n = write_fn_(io_handle(), buf, size);
         if (nsent) {
@@ -472,7 +479,7 @@ class io_socket_tmpl : virtual public io_socket
         return handle_error(n);
     }
 
-    std::error_code send(std::string_view msg, size_t* nsent = nullptr) override
+    std::error_code send(std::string_view msg, size_t* nsent = nullptr) const noexcept override
     {
         return send(msg.data(), msg.size(), nsent);
     }
@@ -482,7 +489,7 @@ class io_socket_tmpl : virtual public io_socket
     ssize_t (*write_fn_)(Handle, const void*, size_t) = nullptr;
 
     io_socket_tmpl(ssize_t (*rfn)(Handle, void*, size_t),
-                   ssize_t (*wfn)(Handle, const void*, size_t))
+                   ssize_t (*wfn)(Handle, const void*, size_t)) noexcept
         : read_fn_(rfn)
         , write_fn_(wfn)
     {
@@ -600,7 +607,7 @@ class tcp_client
     uint16_t port_;
     int conn_state_ = 0;
 
-    int connect_()
+    int connect_() const noexcept
     {
         auto ipaddr = resolver::get_instance().lookup(peer_);
         if (ipaddr < 0) {
@@ -677,7 +684,7 @@ class tcp_server : public acceptor
     }
 
   private:
-    int accept_()
+    int accept_() const
     {
         struct sockaddr_in peer;
         socklen_t addrlen = sizeof(peer);
@@ -716,7 +723,7 @@ class ssl_ctx
     ssl_ctx& operator=(const ssl_ctx& rhs) noexcept
     {
         if (this != &rhs) {
-            ::SSL_CTX_free(ctx_);
+            free_ctx();
             ctx_ = rhs.ctx_;
             if (ctx_) {
                 ::SSL_CTX_up_ref(ctx_);
@@ -726,13 +733,13 @@ class ssl_ctx
     }
     // movable
     ssl_ctx(ssl_ctx&& rhs) noexcept
+        : ctx_(std::exchange(rhs.ctx_, nullptr))
     {
-        *this = std::move(rhs);
     }
     ssl_ctx& operator=(ssl_ctx&& rhs) noexcept
     {
         if (this != &rhs) {
-            ::SSL_CTX_free(ctx_);
+            free_ctx();
             ctx_ = std::exchange(rhs.ctx_, nullptr);
         }
         return *this;
@@ -740,10 +747,7 @@ class ssl_ctx
 
     ~ssl_ctx() noexcept
     {
-        if (ctx_) {
-            ::SSL_CTX_free(ctx_);
-            ctx_ = nullptr;
-        }
+        free_ctx();
     }
 
     SSL_CTX* get() const noexcept
@@ -759,7 +763,7 @@ class ssl_ctx
         return *get();
     }
 
-    void load_certificate(std::string_view certfile, std::string_view keyfile)
+    void load_certificate(std::string_view certfile, std::string_view keyfile) const
     {
         if (!certfile.empty() && !keyfile.empty()) {
             if (::SSL_CTX_use_certificate_file(ctx_, certfile.data(), SSL_FILETYPE_PEM) != 1 ||
@@ -775,7 +779,7 @@ class ssl_ctx
         return preverified;
     }
 
-    void load_ca_file(std::string_view cafile)
+    void load_ca_file(std::string_view cafile) const
     {
         if (!cafile.empty()) {
             if (!::SSL_CTX_load_verify_locations(ctx_, cafile.data(), nullptr)) {
@@ -789,6 +793,14 @@ class ssl_ctx
 
   private:
     SSL_CTX* ctx_ = nullptr;
+
+    void free_ctx() noexcept
+    {
+        if (ctx_) {
+            ::SSL_CTX_free(ctx_);
+            ctx_ = nullptr;
+        }
+    }
 };
 
 /**
@@ -867,7 +879,7 @@ class ssl
         return ctx_;
     }
 
-    void set_verify_hostname(std::string_view peer)
+    void set_verify_hostname(std::string_view peer) const
     {
         if (!::SSL_set_tlsext_host_name(ssl_, peer.data()) || !::SSL_set1_host(ssl_, peer.data())) {
             THROW_SSLERR("SSL_set_tlsext_host_name");
@@ -924,7 +936,7 @@ class secure_socket_base : virtual public socket_base
     {
     }
 
-    secure_socket_base(ssl_ctx&& ctx, ssl&& ssl)
+    secure_socket_base(ssl_ctx&& ctx, ssl&& ssl) noexcept
         : ctx_(std::move(ctx))
         , ssl_(std::move(ssl))
     {
@@ -992,7 +1004,7 @@ class tls_socket
     }
 
     // blocking handshake
-    void handshake_(int timeout_ms = -1)
+    void handshake_(int timeout_ms = -1) const
     {
         using namespace std::chrono;
         int remains = timeout_ms;
@@ -1013,7 +1025,7 @@ class tls_socket
     }
 
     // non-blocking handshake
-    bool handshake_nb_()
+    bool handshake_nb_() const
     {
         auto ret = handshake_fn_(ssl_.get());
         if (ret >= 1) {

@@ -27,21 +27,19 @@ class isemaphore
         nmaps_ = count >> 6;       // count / 64 => 0 ~ 63
         auto rem = count & 0x3fU;  // count % 64 => 0 ~ 63
         if (rem > 0) {
-          ++nmaps_;
+            ++nmaps_;
         }
         availables_ = std::make_unique<uint64_t[]>(nmaps_);
         for (size_t i = 0; i < nmaps_; ++i) {
             availables_[i] = 0xffffffffffffffffULL;
         }
         if (rem > 0) {
-            availables_[nmaps_ - 1] =
-                (rem == 64) ? 0xffffffffffffffffULL : ((1ULL << rem) - 1);
+            availables_[nmaps_ - 1] = (rem == 64) ? 0xffffffffffffffffULL : ((1ULL << rem) - 1);
         }
         indirects_ = (nmaps_ == 64) ? 0xffffffffffffffffULL : (1ULL << nmaps_) - 1;
-
     }
 
-    ~isemaphore(void) = default;
+    ~isemaphore(void) noexcept = default;
 
     /**
      * wait_ms > 0: => wait specified milliseconds

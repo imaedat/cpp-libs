@@ -32,7 +32,7 @@ class mutex_wrap
     {
     }
 
-    virtual ~mutex_wrap() = default;
+    virtual ~mutex_wrap() noexcept = default;
 
     std::unique_ptr<T, Deleter> lock()
     {

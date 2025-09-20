@@ -16,7 +16,7 @@ namespace tbd {
 class rate_limiter
 {
   public:
-    virtual ~rate_limiter() = default;
+    virtual ~rate_limiter() noexcept = default;
     virtual bool try_request(int64_t quantity) = 0;
 
   protected:
