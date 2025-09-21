@@ -1,6 +1,7 @@
 #ifndef MESSAGE_QUEUE_HPP_
 #define MESSAGE_QUEUE_HPP_
 
+#include <assert.h>
 #include <errno.h>
 #include <poll.h>
 #include <sys/eventfd.h>
@@ -68,13 +69,13 @@ class message_queue
         return eventfd_;
     }
 
-    template <typename U, typename = std::enable_if_t<
-                              std::is_same<T, typename std::remove_reference<U>::type>::value>>
+    template <typename U,
+              typename = std::enable_if_t<std::is_same<T, std::remove_reference_t<U>>::value>>
     void push(U&& msg)
     {
         std::lock_guard<qmtx_type> lk(*queue_mtx_);
         mq_.push(std::forward<T>(msg));
-        eventfd_write(eventfd_, 1);
+        (void)::eventfd_write(eventfd_, 1);
     }
 
     T pop()
@@ -93,7 +94,7 @@ class message_queue
 #ifdef MESSAGE_QUEUE_MULTIPLE_READERS
         auto t1 = steady_clock::now();
         std::unique_lock<rmtx_type> lk(*reader_mtx_, std::defer_lock);
-        if (!lk.try_lock_for(std::chrono::milliseconds(wait_ms))) {
+        if (!lk.try_lock_for(milliseconds(wait_ms))) {
             return std::nullopt;
         }
         auto t2 = steady_clock::now();
@@ -132,10 +133,11 @@ class message_queue
 
     T pop_()
     {
-        uint64_t u;
-        (void)::read(eventfd_, &u, sizeof(u));
+        eventfd_t value;
+        (void)::eventfd_read(eventfd_, &value);
 
         std::lock_guard<qmtx_type> lk(*queue_mtx_);
+        assert(!mq_.empty());
         T msg = std::move(mq_.front());
         mq_.pop();
         return msg;
