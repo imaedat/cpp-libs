@@ -1,3 +1,7 @@
+/*
+ * This code uses OpenSSL, which is licensed under the Apache License 2.0.
+ * See https://openssl-library.org/source/license/index.html for details.
+ */
 #ifndef SOCKET_HPP_
 #define SOCKET_HPP_
 
