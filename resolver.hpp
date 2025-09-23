@@ -13,6 +13,7 @@
 #include <future>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -200,36 +201,32 @@ class resolver_base
         cache::get_instance().remove_by_addr(ipaddr);
     }
 
-    int64_t lookup(int timeout_ms = -1)
+    std::optional<uint32_t> lookup(int timeout_ms = -1)
     {
         auto addr = lookup_nb();
-        if (addr >= 0) {
-            return addr;
-        }
-        if (int err = poll(timeout_ms)) {
-            return on_rejected(err);
-        }
-        return on_resolved();
+        return addr ? addr : poll(timeout_ms);
     }
 
-    int64_t lookup_nb()
+    std::optional<uint32_t> lookup_nb()
     {
+        static const std::regex re{
+            "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"};
+
         switch (resolve_state_) {
         case 0: {
+            if (std::regex_match(host_.data(), re)) {
+                resolve_state_ = 2;
+                return (ipaddr_ = inet_addr(host_.data()));
+            }
             if (auto addr = cache::get_instance().find_addr_by_name(host_)) {
-                return on_cache_hit(*addr);
+                resolve_state_ = 2;
+                return (ipaddr_ = *addr);
             }
-            if (int err = async_request()) {
-                return on_rejected(err);
-            }
-            resolve_state_ = 1;
+            async_request();
             [[fallthrough]];
         }
         case 1: {
-            if (int err = poll()) {
-                return on_rejected(err);
-            }
-            return on_resolved();
+            return poll();
         }
         default:
             return ipaddr_;
@@ -239,26 +236,16 @@ class resolver_base
   protected:
     std::string host_;
     int resolve_state_ = 0;
-    int64_t ipaddr_ = -ENOENT;
+    uint32_t ipaddr_ = 0;
 
     explicit resolver_base(std::string_view host)
         : host_(host)
         , resolve_state_(0)
-        , ipaddr_(-ENOENT)
     {
     }
 
-    uint32_t on_cache_hit(uint32_t ipaddr)
-    {
-        ipaddr_ = ipaddr;
-        resolve_state_ = 2;
-        return ipaddr_;
-    }
-
-    virtual int async_request() = 0;
-    virtual int poll(int timeout_ms = 0) = 0;
-    virtual uint32_t on_resolved() = 0;
-    virtual int on_rejected(int err) = 0;
+    virtual void async_request() = 0;
+    virtual std::optional<uint32_t> poll(int timeout_ms = 0) = 0;
 };  // calss resolver_base
 
 /**********************************************************************
@@ -292,57 +279,47 @@ class resolver : public resolver_base
     struct addrinfo hints_ = {};
     struct gaicb* list_[1] = {nullptr};
 
-    virtual int async_request() override
+    virtual void async_request() override
     {
         // getaddrinfo_a: 0, EAI_AGAIN, EAI_MEMORY, EAI_SYSTEM
-        return ::getaddrinfo_a(GAI_NOWAIT, list_, 1, nullptr);
+        if (int err = ::getaddrinfo_a(GAI_NOWAIT, list_, 1, nullptr)) {
+            throw std::runtime_error(std::string("getaddrinfo_a: ") + ::gai_strerror(err));
+        }
+        resolve_state_ = 1;
     }
 
-    virtual int poll(int timeout_ms = 0) override
+    std::optional<uint32_t> poll(int timeout_ms = 0) override
     {
         assert(resolve_state_ == 1);
 
         // gai_suspend: 0 | EAI_ALLDONE | EAI_INTR => go through, EAI_AGAIN => EAGAIN
-        struct timespec ts;
+        struct timespec ts, *tsptr = nullptr;
         if (timeout_ms >= 0) {
             ts.tv_sec = timeout_ms / 1000;
             ts.tv_nsec = (timeout_ms % 1000) * 1'000'000;
+            tsptr = &ts;
         }
-        if (int err = ::gai_suspend(list_, 1, timeout_ms >= 0 ? &ts : nullptr)) {
+        if (int err = ::gai_suspend(list_, 1, tsptr)) {
             if (err == EAI_AGAIN) {
-                return err;
+                return std::nullopt;
             }
         }
 
         // gai_error: 0 => go through, EAI_INPROGRESS => EAGAIN, EAI_CANCELED => exception
-        return ::gai_error(&req_);
-    }
+        if (int err = ::gai_error(&req_)) {
+            if (err == EAI_INPROGRESS) {
+                return std::nullopt;
+            }
+            free_result();
+            resolve_state_ = 0;
+            throw std::runtime_error(std::string("getaddrinfo_a: ") + ::gai_strerror(err));
+        }
 
-    virtual uint32_t on_resolved() override
-    {
-        // ar_result
         ipaddr_ = ((struct sockaddr_in*)req_.ar_result->ai_addr)->sin_addr.s_addr;
         resolve_state_ = 2;
         free_result();
         cache::get_instance().add_or_replace(host_, (uint32_t)ipaddr_);
         return ipaddr_;
-    }
-
-    virtual int on_rejected(int err) override
-    {
-        if (resolve_state_ == 1 && (err == EAI_AGAIN || err == EAI_INPROGRESS)) {
-            return -EAGAIN;
-        }
-
-        free_result();
-
-        if (err == EAI_NONAME || err == EAI_NODATA) {
-            resolve_state_ = 2;
-            return -ENOENT;
-        }
-
-        resolve_state_ = 0;
-        throw std::runtime_error(std::string("getaddrinfo_a: ") + ::gai_strerror(err));
     }
 
     void free_result() noexcept
@@ -387,19 +364,17 @@ class notifiable_resolver : public resolver_base
 
   private:
     int eventfd_ = -1;
-    std::future<int64_t> future_;
+    std::future<int> future_;
 
-    int async_request() override
+    void async_request() override
     {
         future_ = std::async(std::launch::async, [this]() {
             struct addrinfo hints, *result = nullptr;
             ::memset(&hints, 0, sizeof(struct addrinfo));
             hints.ai_family = AF_INET;
             auto err = ::getaddrinfo(host_.c_str(), nullptr, &hints, &result);
-
-            int64_t ipaddr = -ENOENT;
             if (err == 0) {
-                ipaddr = (uint32_t)((struct sockaddr_in*)result->ai_addr)->sin_addr.s_addr;
+                ipaddr_ = (uint32_t)((struct sockaddr_in*)result->ai_addr)->sin_addr.s_addr;
             }
             if (result) {
                 ::freeaddrinfo(result);
@@ -408,40 +383,30 @@ class notifiable_resolver : public resolver_base
             eventfd_t value;
             ::eventfd_read(eventfd_, &value);
 
-            return ipaddr;
+            return err;
         });
 
-        return 0;
+        resolve_state_ = 1;
     }
 
-    int poll(int timeout_ms = 0) override
+    std::optional<uint32_t> poll(int timeout_ms = 0) override
     {
         assert(resolve_state_ == 1);
-        auto status = future_.wait_for(std::chrono::milliseconds(timeout_ms));
-        return (status == std::future_status::timeout) ? EAGAIN : 0;
-    }
 
-    uint32_t on_resolved() override
-    {
-        ipaddr_ = future_.get();
+        auto status = future_.wait_for(std::chrono::milliseconds(timeout_ms));
+        if (status == std::future_status::timeout) {
+            return std::nullopt;
+        }
+
+        auto err = future_.get();
+        if (err) {
+            resolve_state_ = 0;
+            throw std::runtime_error(std::string("getaddrinfo: ") + ::gai_strerror(err));
+        }
+
         resolve_state_ = 2;
         cache::get_instance().add_or_replace(host_, (uint32_t)ipaddr_);
         return ipaddr_;
-    }
-
-    virtual int on_rejected(int err) override
-    {
-        if (resolve_state_ == 1 && err == EAGAIN) {
-            return -EAGAIN;
-        }
-
-        if (err == ENOENT) {
-            resolve_state_ = 2;
-            return -ENOENT;
-        }
-
-        resolve_state_ = 0;
-        throw std::system_error(err, std::generic_category(), "getaddrinfo");
     }
 };
 
