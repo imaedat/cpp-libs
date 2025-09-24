@@ -93,11 +93,11 @@ class sliding_window_log : public rate_limiter
     bool try_request(int64_t quantity) override
     {
         auto now = std::chrono::steady_clock::now();
-        auto begging_of_window = now - window_;
+        auto beginning_of_window = now - window_;
 #ifdef RATE_LIMITR_VERBOSE
         auto before = log_.size();
 #endif
-        while (!log_.empty() && log_.front().arrived_at < begging_of_window) {
+        while (!log_.empty() && log_.front().arrived_at < beginning_of_window) {
             amount_in_window_ -= log_.front().quantity;
             log_.pop_front();
         }

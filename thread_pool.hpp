@@ -23,6 +23,7 @@ class thread_pool
         , noutstandings_(0)
 #endif
     {
+        assert(n > 0);
         for (size_t i = 0; i < n; ++i) {
             workers_.emplace_back([this] { executor(); });
         }

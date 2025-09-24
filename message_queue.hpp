@@ -69,8 +69,7 @@ class message_queue
         return eventfd_;
     }
 
-    template <typename U,
-              typename = std::enable_if_t<std::is_same<T, std::remove_reference_t<U>>::value>>
+    template <typename U, typename = std::enable_if_t<std::is_same_v<T, std::decay_t<U>>>>
     void push(U&& msg)
     {
         std::lock_guard<qmtx_type> lk(*queue_mtx_);

@@ -145,8 +145,7 @@ class sender
         fd_ = -1;
     }
 
-    template <typename U, typename = std::enable_if_t<
-                              std::is_same<T, typename std::remove_reference<U>::type>::value>>
+    template <typename U, typename = std::enable_if_t<std::is_same_v<T, std::decay_t<U>>>>
     void send(U&& msg) const
     {
         if (::write(fd_, &msg, sizeof(T)) < 0) {
