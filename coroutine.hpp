@@ -75,7 +75,7 @@ class coroutine_env_tmpl
             , finished_(std::exchange(rhs.finished_, false))
             , env_(std::exchange(rhs.env_, nullptr))
             , uctx_(std::exchange(rhs.uctx_, {}))
-            , value_(std::move(value_))
+            , value_(std::move(rhs.value_))
         {
         }
         coroutine& operator=(coroutine&& rhs) noexcept
@@ -87,8 +87,8 @@ class coroutine_env_tmpl
                 finished_ = std::exchange(rhs.finished_, false);
                 env_ = std::exchange(rhs.env_, nullptr);
                 uctx_ = std::exchange(rhs.uctx_, {});
-                value_ = std::move(value_);
-                ::makecontext(&uctx_, (void (*)()) & entry, 1, this);
+                value_ = std::move(rhs.value_);
+                ::makecontext(&uctx_, (void (*)()) & entry, 1, (uintptr_t)this);
                 // 1st argument of `entry`
                 // uctx_.uc_mcontext.gregs[REG_RDI] = (greg_t)this;
             }
@@ -120,6 +120,7 @@ class coroutine_env_tmpl
         coroutine_env_tmpl<T, U>* env_ = nullptr;
         ucontext_t uctx_;
         ret_type value_;
+        std::exception_ptr exception_;
 
         coroutine(coro_fn&& fn, size_t ss, coroutine_env_tmpl<T, U>* env)
             : fn_(std::forward<coro_fn>(fn))
@@ -133,6 +134,8 @@ class coroutine_env_tmpl
             }
 
             size_t pagesz = ::sysconf(_SC_PAGE_SIZE);
+            // align stack_size_
+            stack_size_ = ((stack_size_ + pagesz - 1) / pagesz) * pagesz;
             stack_ = (char*)::aligned_alloc(pagesz, pagesz + stack_size_);
             if (!stack_) {
                 throw std::bad_alloc();
@@ -143,24 +146,19 @@ class coroutine_env_tmpl
             uctx_.uc_stack.ss_size = stack_size_;
             uctx_.uc_link = &env_->uctx_;
 
-            ::makecontext(&uctx_, (void (*)()) & entry, 1, this);
+            ::makecontext(&uctx_, (void (*)()) & entry, 1, (uintptr_t)this);
         }
 
-        static void entry(coroutine* co)
+        static void entry(uintptr_t ptr)
         {
-            std::exception_ptr ep;
-
+            auto* co = (coroutine*)ptr;
             try {
                 co->fn_(yielder(co->env_, co));
             } catch (...) {
-                ep = std::current_exception();
+                co->exception_ = std::current_exception();
             }
 
             co->finished_ = true;
-
-            if (ep) {
-                std::rethrow_exception(ep);
-            }
         }
     };  // class coroutine
 
@@ -179,7 +177,7 @@ class coroutine_env_tmpl
     coroutine_env_tmpl(coroutine_env_tmpl&& rhs) noexcept
         : uctx_(std::exchange(rhs.uctx_, {}))
         , current_(std::exchange(rhs.current_, nullptr))
-        , last_value_(std::move(last_value_))
+        , last_value_(std::move(rhs.last_value_))
     {
         ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
         ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
@@ -191,7 +189,7 @@ class coroutine_env_tmpl
             ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
             uctx_ = std::exchange(rhs.uctx_, {});
             current_ = std::exchange(rhs.current_, nullptr);
-            last_value_ = std::move(last_value_);
+            last_value_ = std::move(rhs.last_value_);
         }
         return *this;
     }
@@ -240,6 +238,13 @@ class coroutine_env_tmpl
                                     "coroutine_env::resume: swapcontext");
         }
 
+        current_ = nullptr;
+        if (co->exception_) {
+            auto ep = std::move(co->exception_);
+            co->exception_ = nullptr;
+            std::rethrow_exception(ep);
+        }
+
         if (last_value_) {
             // on yield w/ value
             auto val = std::move(*last_value_);
@@ -247,7 +252,6 @@ class coroutine_env_tmpl
             return val;
         } else {
             // on return, or on yield w/o value
-            current_ = nullptr;
             return std::nullopt;
         }
     }
@@ -258,9 +262,7 @@ class coroutine_env_tmpl
         assert(&current_->env_->uctx_ == &uctx_);
 
         last_value_ = std::forward<gen_type>(v);
-        auto* cur_ctx = &current_->uctx_;
-        current_ = nullptr;
-        if (::swapcontext(cur_ctx, &uctx_) < 0) {
+        if (::swapcontext(&current_->uctx_, &uctx_) < 0) {
             throw std::system_error(errno, std::generic_category(),
                                     "coroutine_env::yield: swapcontext");
         }
