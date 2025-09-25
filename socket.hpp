@@ -14,9 +14,10 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
-//
-#include <openssl/err.h>
-#include <openssl/ssl.h>
+#ifdef SOCKET_USE_OPENSSL
+#    include <openssl/err.h>
+#    include <openssl/ssl.h>
+#endif
 
 #ifdef SOCKET_VERBOSE
 #    include <stdio.h>
@@ -145,6 +146,7 @@ class resolver
     resolver() noexcept = default;
 };
 
+#ifdef SOCKET_USE_OPENSSL
 namespace detail {
 ssize_t ssl_read(SSL* s, void* buf, size_t size) noexcept
 {
@@ -160,6 +162,7 @@ ssize_t ssl_write(SSL* s, const void* buf, size_t size) noexcept
     return (ret > 0) ? (ssize_t)nbytes : ret;
 }
 }  // namespace detail
+#endif
 
 /****************************************************************************
  * base class
@@ -308,14 +311,14 @@ class socket_base
 /****************************************************************************
  * read/write interface
  */
-class io_socket : virtual public socket_base
+class io_socket_concept : virtual public socket_base
 {
   public:
-    io_socket(io_socket&& rhs) noexcept
+    io_socket_concept(io_socket_concept&& rhs) noexcept
         : socket_base(std::move(rhs))
     {
     }
-    io_socket& operator=(io_socket&& rhs) noexcept
+    io_socket_concept& operator=(io_socket_concept&& rhs) noexcept
     {
         if (this != &rhs) {
             socket_base::operator=(std::move(rhs));
@@ -338,76 +341,26 @@ class io_socket : virtual public socket_base
     virtual std::error_code send(std::string_view msg, size_t* nsent = nullptr) const noexcept = 0;
 
   protected:
-    io_socket() noexcept = default;
-};
-
-/****************************************************************************
- * connect interface
- */
-class connector : virtual public io_socket
-{
-  public:
-    connector(connector&& rhs) noexcept
-        : io_socket(std::move(rhs))
-    {
-    }
-    connector& operator=(connector&& rhs) noexcept
-    {
-        if (this != &rhs) {
-            io_socket::operator=(std::move(rhs));
-        }
-        return *this;
-    }
-
-    virtual void connect(int timeout_ms = -1) = 0;
-    virtual bool connect_nb() = 0;
-
-  protected:
-    connector() noexcept = default;
-};
-
-/****************************************************************************
- * accept interface
- */
-class acceptor : virtual public socket_base
-{
-  public:
-    acceptor(acceptor&& rhs) noexcept
-        : socket_base(std::move(rhs))
-    {
-    }
-    acceptor& operator=(acceptor&& rhs) noexcept
-    {
-        if (this != &rhs) {
-            socket_base::operator=(std::move(rhs));
-        }
-        return *this;
-    }
-
-    virtual std::unique_ptr<io_socket> accept(int timeout_ms = -1) = 0;
-    virtual std::unique_ptr<io_socket> accept_nb() = 0;
-
-  protected:
-    acceptor() noexcept = default;
+    io_socket_concept() noexcept = default;
 };
 
 /****************************************************************************
  * issue IO with Handle
  */
 template <typename Handle>
-class io_socket_tmpl : virtual public io_socket
+class io_socket_model : virtual public io_socket_concept
 {
   public:
-    io_socket_tmpl(io_socket_tmpl&& rhs) noexcept
+    io_socket_model(io_socket_model&& rhs) noexcept
         : socket_base(std::move(rhs))
         , read_fn_(std::exchange(rhs.read_fn_, nullptr))
         , write_fn_(std::exchange(rhs.write_fn_, nullptr))
     {
     }
-    io_socket_tmpl& operator=(io_socket_tmpl&& rhs) noexcept
+    io_socket_model& operator=(io_socket_model&& rhs) noexcept
     {
         if (this != &rhs) {
-            io_socket::operator=(std::move(rhs));
+            io_socket_concept::operator=(std::move(rhs));
             read_fn_ = std::exchange(rhs.read_fn_, nullptr);
             write_fn_ = std::exchange(rhs.write_fn_, nullptr);
         }
@@ -492,8 +445,8 @@ class io_socket_tmpl : virtual public io_socket
     ssize_t (*read_fn_)(Handle, void*, size_t) = nullptr;
     ssize_t (*write_fn_)(Handle, const void*, size_t) = nullptr;
 
-    io_socket_tmpl(ssize_t (*rfn)(Handle, void*, size_t),
-                   ssize_t (*wfn)(Handle, const void*, size_t)) noexcept
+    io_socket_model(ssize_t (*rfn)(Handle, void*, size_t),
+                    ssize_t (*wfn)(Handle, const void*, size_t)) noexcept
         : read_fn_(rfn)
         , write_fn_(wfn)
     {
@@ -515,15 +468,155 @@ class io_socket_tmpl : virtual public io_socket
 };
 
 /****************************************************************************
+ * type erasure
+ */
+class io_socket
+{
+  public:
+    io_socket() = default;
+
+    template <typename Handle>
+    io_socket(std::unique_ptr<io_socket_model<Handle>>& new_sock)
+        : impl_(std::move(new_sock))
+    {
+    }
+
+    std::error_code recv_nb(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept
+    {
+        return impl_->recv_nb(buf, size, nrecv);
+    }
+    std::error_code recv_some(void* buf, size_t size, int timeout_ms,
+                              size_t* nrecv = nullptr) const noexcept
+    {
+        return impl_->recv_some(buf, size, timeout_ms, nrecv);
+    }
+    std::error_code recv_some(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept
+    {
+        return impl_->recv_some(buf, size, nrecv);
+    }
+    std::error_code recv(void* buf, size_t size, int timeout_ms,
+                         size_t* nrecv = nullptr) const noexcept
+    {
+        return impl_->recv(buf, size, timeout_ms, nrecv);
+    }
+    std::error_code recv(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept
+    {
+        return impl_->recv(buf, size, nrecv);
+    }
+    std::error_code send(const void* buf, size_t size, size_t* nsent = nullptr) const noexcept
+    {
+        return impl_->send(buf, size, nsent);
+    }
+    std::error_code send(std::string_view msg, size_t* nsent = nullptr) const noexcept
+    {
+        return impl_->send(msg, nsent);
+    }
+
+    explicit operator bool() const noexcept
+    {
+        return (bool)impl_;
+    }
+    void close() noexcept
+    {
+        impl_->close();
+    }
+    int release() noexcept
+    {
+        return impl_->release();
+    }
+    int native_handle() const noexcept
+    {
+        return impl_->native_handle();
+    }
+    int set_nonblock(bool set = true) const
+    {
+        return impl_->set_nonblock(set);
+    }
+    void bind(std::string_view ipaddr, uint16_t port = 0) const
+    {
+        impl_->bind(ipaddr, port);
+    }
+    void setsockopt(int so_optname, int val) const
+    {
+        impl_->setsockopt(so_optname, val);
+    }
+    void settcpopt(int tcp_optname, int val) const
+    {
+        impl_->settcpopt(tcp_optname, val);
+    }
+    std::pair<std::string, uint16_t> local_endpoint() const
+    {
+        return impl_->local_endpoint();
+    }
+    std::pair<std::string, uint16_t> remote_endpoint() const
+    {
+        return impl_->remote_endpoint();
+    }
+
+  private:
+    std::unique_ptr<io_socket_concept> impl_ = nullptr;
+};
+
+/****************************************************************************
+ * connect interface
+ */
+class connector : virtual public io_socket_concept
+{
+  public:
+    connector(connector&& rhs) noexcept
+        : io_socket_concept(std::move(rhs))
+    {
+    }
+    connector& operator=(connector&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            io_socket_concept::operator=(std::move(rhs));
+        }
+        return *this;
+    }
+
+    virtual void connect(int timeout_ms = -1) = 0;
+    virtual bool connect_nb() = 0;
+
+  protected:
+    connector() noexcept = default;
+};
+
+/****************************************************************************
+ * accept interface
+ */
+class acceptor : virtual public socket_base
+{
+  public:
+    acceptor(acceptor&& rhs) noexcept
+        : socket_base(std::move(rhs))
+    {
+    }
+    acceptor& operator=(acceptor&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            socket_base::operator=(std::move(rhs));
+        }
+        return *this;
+    }
+
+    virtual io_socket accept(int timeout_ms = -1) = 0;
+    virtual io_socket accept_nb() = 0;
+
+  protected:
+    acceptor() noexcept = default;
+};
+
+/****************************************************************************
  * TCP socket, issue IO with Handle = int (read, write)
  */
-class tcp_socket : public io_socket_tmpl<int>
+class tcp_socket : public io_socket_model<int>
 {
   public:
     tcp_socket(tcp_socket&& rhs) noexcept
         : socket_base(std::move(rhs))
-        , io_socket_tmpl<int>(std::exchange(rhs.read_fn_, nullptr),
-                              std::exchange(rhs.write_fn_, nullptr))
+        , io_socket_model<int>(std::exchange(rhs.read_fn_, nullptr),
+                               std::exchange(rhs.write_fn_, nullptr))
     {
     }
     tcp_socket& operator=(tcp_socket&& rhs) noexcept
@@ -538,7 +631,7 @@ class tcp_socket : public io_socket_tmpl<int>
 
   protected:
     tcp_socket() noexcept
-        : io_socket_tmpl<int>(::read, ::write)
+        : io_socket_model<int>(::read, ::write)
     {
     }
 
@@ -657,7 +750,7 @@ class tcp_server : public acceptor
     }
 
     // blocking accept
-    std::unique_ptr<io_socket> accept(int timeout_ms = -1) override
+    io_socket accept(int timeout_ms = -1) override
     {
         if (!wait_readable(timeout_ms)) {
             THROW_SYSERR(ETIMEDOUT, "accept");
@@ -667,24 +760,26 @@ class tcp_server : public acceptor
             THROW_SYSERR(-new_fd, "accept");
         }
 
-        tcp_socket new_tcp(new_fd);
-        return std::make_unique<tcp_socket>(std::move(new_tcp));
+        std::unique_ptr<io_socket_model<int>> new_tcp =
+            std::make_unique<tcp_socket>(tcp_socket(new_fd));
+        return io_socket(new_tcp);
     }
 
     // non-blocking accept
-    std::unique_ptr<io_socket> accept_nb() override
+    io_socket accept_nb() override
     {
         int new_fd = accept_();
         if (new_fd < 0) {
             int err = -new_fd;
             if (err == EAGAIN || err == EWOULDBLOCK) {
-                return nullptr;
+                return io_socket();
             }
             THROW_SYSERR(err, "accept");
         }
 
-        tcp_socket new_tcp(new_fd);
-        return std::make_unique<tcp_socket>(std::move(new_tcp));
+        std::unique_ptr<io_socket_model<int>> new_tcp =
+            std::make_unique<tcp_socket>(tcp_socket(new_fd));
+        return io_socket(new_tcp);
     }
 
   private:
@@ -697,6 +792,7 @@ class tcp_server : public acceptor
     }
 };
 
+#ifdef SOCKET_USE_OPENSSL
 /****************************************************************************
  * SSL/TLS objects
  */
@@ -951,14 +1047,14 @@ class secure_socket_base : virtual public socket_base
  * TLS socket, issue IO with Handle = SSL* (SSL_read, SSL_write)
  */
 class tls_socket
-    : public io_socket_tmpl<SSL*>
+    : public io_socket_model<SSL*>
     , public secure_socket_base
 {
   public:
     tls_socket(tls_socket&& rhs) noexcept
         : socket_base(std::move(rhs))
-        , io_socket_tmpl<SSL*>(std::exchange(rhs.read_fn_, nullptr),
-                               std::exchange(rhs.write_fn_, nullptr))
+        , io_socket_model<SSL*>(std::exchange(rhs.read_fn_, nullptr),
+                                std::exchange(rhs.write_fn_, nullptr))
         , secure_socket_base(std::move(rhs.ctx_), std::move(rhs.ssl_))
         , is_server_(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method())
         , handshake_fn_(is_server_ ? ::SSL_accept : ::SSL_connect)
@@ -980,7 +1076,7 @@ class tls_socket
 
   protected:
     explicit tls_socket(const ssl_ctx& ctx)
-        : io_socket_tmpl<SSL*>(detail::ssl_read, detail::ssl_write)
+        : io_socket_model<SSL*>(detail::ssl_read, detail::ssl_write)
         , secure_socket_base(ctx)
         , is_server_(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method())
         , handshake_fn_(is_server_ ? ::SSL_accept : ::SSL_connect)
@@ -988,7 +1084,7 @@ class tls_socket
     }
 
     explicit tls_socket(ssl&& ssl)
-        : io_socket_tmpl<SSL*>(detail::ssl_read, detail::ssl_write)
+        : io_socket_model<SSL*>(detail::ssl_read, detail::ssl_write)
         , secure_socket_base(ssl)
         , is_server_(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method())
         , handshake_fn_(is_server_ ? ::SSL_accept : ::SSL_connect)
@@ -1074,12 +1170,12 @@ class tls_socket
 
     void print_cipher() const noexcept
     {
-#ifdef SOCKET_VERBOSE
+#    ifdef SOCKET_VERBOSE
         const char* version = ::SSL_get_version(ssl_.get());
         const char* cipher = ::SSL_CIPHER_get_name(::SSL_get_current_cipher(ssl_.get()));
         printf(" *** [%04ld] %s Handshake: %s, %s ***\n", syscall(SYS_gettid),
                (is_server_ ? "Server" : "Client"), version, cipher);
-#endif
+#    endif
     }
 
     friend class tls_server;
@@ -1178,7 +1274,7 @@ class tls_server
         return tcp_.native_handle();
     }
 
-    std::unique_ptr<io_socket> accept(int timeout_ms = -1) override
+    io_socket accept(int timeout_ms = -1) override
     {
         using namespace std::chrono;
         auto t1 = steady_clock::now();
@@ -1187,38 +1283,42 @@ class tls_server
         accept_state_ = 1;
         auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
         int remains = (timeout_ms < 0) ? -1 : (int)std::max(timeout_ms - elapsed, 0L);
-        auto new_ssl = ctx_.new_ssl(*new_tcp);
-        tls_socket new_tls(std::move(new_ssl));
-        new_tls.handshake_(remains);
+        auto new_ssl = ctx_.new_ssl(new_tcp);
+        auto new_tls = std::make_unique<tls_socket>(tls_socket(std::move(new_ssl)));
+        new_tls->handshake_(remains);
         accept_state_ = 0;
-        return std::make_unique<tls_socket>(std::move(new_tls));
+        std::unique_ptr<io_socket_model<SSL*>> new_tls_cast(
+            static_cast<io_socket_model<SSL*>*>(new_tls.release()));
+        return io_socket(new_tls_cast);
     }
 
-    std::unique_ptr<io_socket> accept_nb() override
+    io_socket accept_nb() override
     {
         switch (accept_state_) {
         case 0: {
             auto new_tcp = tcp_.accept_nb();
             if (!new_tcp) {
-                return nullptr;
+                return io_socket();
             }
-            new_tls_ = std::make_unique<tls_socket>(tls_socket(ctx_.new_ssl(*new_tcp)));
+            new_tls_ = std::make_unique<tls_socket>(tls_socket(ctx_.new_ssl(new_tcp)));
             accept_state_ = 1;
             [[fallthrough]];
         }
         case 1: {
             // FIXME exception unsafe
             if (!new_tls_->handshake_nb_()) {
-                return nullptr;
+                return io_socket();
             }
             accept_state_ = 0;
-            return std::unique_ptr<io_socket>(static_cast<io_socket*>(new_tls_.release()));
+            std::unique_ptr<io_socket_model<SSL*>> new_tls_cast(
+                static_cast<io_socket_model<SSL*>*>(new_tls_.release()));
+            return io_socket(new_tls_cast);
         }
         default:
             break;
         }
 
-        return nullptr;
+        return io_socket();
     }
 
   private:
@@ -1226,6 +1326,7 @@ class tls_server
     int accept_state_ = 0;
     std::unique_ptr<tls_socket> new_tls_ = nullptr;
 };
+#endif
 
 }  // namespace tbd
 

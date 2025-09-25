@@ -1,3 +1,4 @@
+#define SOCKET_USE_OPENSSL
 #include "socket.hpp"
 
 #include <signal.h>
@@ -73,7 +74,7 @@ void c2s(unique_ptr<connector>& cli, unique_ptr<acceptor>& svr)
 
     pool.submit([&svr] {
         auto sess = svr->accept();
-        sloop(*sess);
+        sloop(sess);
     });
 
     usleep(500 * 1000);
@@ -95,7 +96,7 @@ void c2s_nb(unique_ptr<connector>& cli, unique_ptr<acceptor>& svr)
                 continue;
             }
             LOG("server : nacpt=%d\n", nacpt);
-            sloop(*sess);
+            sloop(sess);
             break;
         }
     });
