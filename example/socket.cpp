@@ -68,29 +68,29 @@ void sloop(io_socket& sess)
     LOG("server : done\n");
 }
 
-void c2s(unique_ptr<connector>& cli, unique_ptr<acceptor>& svr)
+void c2s(connector& cli, acceptor& srv)
 {
     thread_pool pool(1);
 
-    pool.submit([&svr] {
-        auto sess = svr->accept();
+    pool.submit([&srv] {
+        auto sess = srv.accept();
         sloop(sess);
     });
 
     usleep(500 * 1000);
 
-    cli->connect();
-    cloop(*cli);
+    cli.connect();
+    cloop(cli);
 }
 
-void c2s_nb(unique_ptr<connector>& cli, unique_ptr<acceptor>& svr)
+void c2s_nb(connector& cli, acceptor& srv)
 {
     thread_pool pool(1);
 
-    pool.submit([&svr] {
+    pool.submit([&srv] {
         int nacpt = 0;
         while (true) {
-            auto sess = svr->accept_nb();
+            auto sess = srv.accept_nb();
             ++nacpt;
             if (!sess) {
                 continue;
@@ -102,45 +102,45 @@ void c2s_nb(unique_ptr<connector>& cli, unique_ptr<acceptor>& svr)
     });
 
     int nconn = 0;
-    while (!cli->connect_nb()) {
+    while (!cli.connect_nb()) {
         ++nconn;
     }
     LOG("client : nconn=%d\n", ++nconn);
-    cloop(*cli);
+    cloop(cli);
 }
 
 int main()
 {
     signal(SIGPIPE, SIG_IGN);
 
-    ssl_ctx svr_ctx(true);
-    svr_ctx.load_certificate("hostcert.pem", "hostkey.pem");
+    ssl_ctx srv_ctx(true);
+    srv_ctx.load_certificate("hostcert.pem", "hostkey.pem");
 
     ssl_ctx cli_ctx;
     cli_ctx.load_ca_file("cacert.pem");
 
     unique_ptr<connector> cli;
-    unique_ptr<acceptor> svr;
+    unique_ptr<acceptor> srv;
 
     puts("--- tcp / blocking ---");
     cli = make_unique<tcp_client>("127.0.0.1", 8080);
-    svr = make_unique<tcp_server>(8080);
-    c2s(cli, svr);
+    srv = make_unique<tcp_server>(8080);
+    c2s(*cli, *srv);
 
     puts("--- tls / blocking ---");
     cli = make_unique<tls_client>(cli_ctx, "127.0.0.1", 8443);
-    svr = make_unique<tls_server>(svr_ctx, 8443);
-    c2s(cli, svr);
+    srv = make_unique<tls_server>(srv_ctx, 8443);
+    c2s(*cli, *srv);
 
     puts("--- tcp / non-blocking ---");
     cli = make_unique<tcp_client>("127.0.0.1", 8080);
-    svr = make_unique<tcp_server>(8080);
-    c2s_nb(cli, svr);
+    srv = make_unique<tcp_server>(8080);
+    c2s_nb(*cli, *srv);
 
     puts("--- tls / non-blocking ---");
     cli = make_unique<tls_client>(cli_ctx, "127.0.0.1", 8443);
-    svr = make_unique<tls_server>(svr_ctx, 8443);
-    c2s_nb(cli, svr);
+    srv = make_unique<tls_server>(srv_ctx, 8443);
+    c2s_nb(*cli, *srv);
 
     return 0;
 }
