@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <future>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
@@ -14,6 +15,43 @@ namespace tbd {
 
 class thread_pool
 {
+    class any_task
+    {
+        struct concept
+        {
+            virtual void invoke() = 0;
+            virtual ~concept() = default;
+        };
+        template <typename F>
+        struct model : concept
+        {
+            F f;
+            explicit model(F&& f)
+                : f(std::move(f))
+            {
+            }
+            void invoke() override
+            {
+                f();
+            }
+        };
+
+        std::unique_ptr<concept> fp_;
+
+      public:
+        template <typename F>
+        explicit any_task(F&& f)
+            : fp_(std::make_unique<model<F>>(std::move(f)))
+        {
+        }
+        any_task(any_task&&) noexcept = default;
+        any_task& operator=(any_task&&) noexcept = default;
+        void operator()()
+        {
+            fp_->invoke();
+        }
+    };
+
   public:
     explicit thread_pool(size_t n = (std::thread::hardware_concurrency() != 0
                                          ? std::thread::hardware_concurrency()
@@ -39,8 +77,9 @@ class thread_pool
         }
     }
 
-    template <typename F, typename = std::enable_if_t<std::is_invocable_v<F>>>
-    void submit(F&& fn)
+    template <typename F, typename... Args,
+              typename R = std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>>
+    std::future<R> submit(F&& fn, Args&&... args)
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
 
@@ -48,11 +87,18 @@ class thread_pool
             throw std::runtime_error("thread_pool not running");
         }
 
-        taskq_.emplace_back(std::forward<F>(fn));
+        std::packaged_task<R()> task(
+            [fn = std::forward<F>(fn),
+             args = std::make_tuple(std::forward<Args>(args)...)]() mutable {
+                return std::apply(fn, std::move(args));
+            });
+        auto fut = task.get_future();
+        taskq_.emplace_back([task = std::move(task)]() mutable { task(); });
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
         ++noutstandings_;
 #endif
         cv_.notify_one();
+        return fut;
     }
 
     void stop(void)
@@ -86,7 +132,7 @@ class thread_pool
   private:
     bool running_;
     std::vector<std::thread> workers_;
-    std::deque<std::function<void(void)>> taskq_;
+    std::deque<any_task> taskq_;
     std::mutex mtx_;
     std::condition_variable cv_;
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
