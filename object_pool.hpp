@@ -16,23 +16,50 @@ namespace tbd {
 template <typename T>
 class object_pool
 {
+    struct deleter
+    {
+        object_pool* pool = nullptr;
+        void operator()(T* o) const noexcept
+        {
+            if (pool) {
+                pool->release(o);
+            }
+        }
+    };
+
   public:
     template <typename F, typename = std::enable_if_t<std::is_invocable_v<F>>>
     object_pool(size_t max, F&& builder) noexcept
         : max_objs_(max)
         , nr_objs_(0)
-        , builder_(builder)
+        , builder_(std::forward<F>(builder))
     {
     }
 
     explicit object_pool(size_t max)
-        : object_pool(max, []() -> T* { return new T(); })
+        : object_pool(max, [] { return new T(); })
     {
     }
 
-    ~object_pool() noexcept = default;
+    std::unique_ptr<T, deleter> acquire(long wait_ms = -1)
+    {
+        return {acquire_(wait_ms), deleter{this}};
+    }
 
-    std::shared_ptr<T> acquire(long wait_ms = -1)
+    std::shared_ptr<T> acquire_shared(long wait_ms = -1)
+    {
+        return {acquire_(wait_ms), deleter{this}};
+    }
+
+  private:
+    size_t max_objs_;
+    size_t nr_objs_;
+    std::function<T*()> builder_;
+    std::unordered_set<std::unique_ptr<T>> pool_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+
+    T* acquire_(long wait_ms)
     {
         std::unique_lock<decltype(mtx_)> lk(mtx_);
 
@@ -56,23 +83,16 @@ class object_pool
             }
         }
 
-        auto p = std::move(pool_.extract(pool_.begin()).value());
-        return std::shared_ptr<T>(p.release(), [this](T* o) { release(o); });
+        return pool_.extract(pool_.begin()).value().release();
     }
-
-  private:
-    size_t max_objs_;
-    size_t nr_objs_;
-    std::function<T*()> builder_;
-    std::unordered_set<std::unique_ptr<T>> pool_;
-    std::mutex mtx_;
-    std::condition_variable cv_;
 
     void release(T* o)
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
-        pool_.emplace(o);
-        cv_.notify_one();
+        if (o) {
+            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            pool_.emplace(o);
+            cv_.notify_one();
+        }
     }
 };
 

@@ -38,7 +38,7 @@ int main()
     for (unsigned i = 0; i < nworkers; ++i) {
         tpool.submit([&opool, i] {
             printf("%06lu [%02d] start\n", utime(), i);
-            auto obj = opool.acquire(1400);
+            auto obj = (i % 2) ? opool.acquire(1400) : opool.acquire_shared(1400);
             if (obj) {
                 auto ms = 200 + random() % 800;
                 printf("%06lu [%02d] acquire %d, and work for %ld ms ...\n", utime(), i, obj->data,
