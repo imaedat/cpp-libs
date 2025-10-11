@@ -135,7 +135,7 @@ class coroutine_env_tmpl
 
             size_t pagesz = ::sysconf(_SC_PAGE_SIZE);
             // align stack_size_
-            stack_size_ = ((stack_size_ + pagesz - 1) / pagesz) * pagesz;
+            stack_size_ = (stack_size_ + pagesz - 1) & ~(pagesz - 1);
             stack_ = (char*)::aligned_alloc(pagesz, pagesz + stack_size_);
             if (!stack_) {
                 throw std::bad_alloc();
