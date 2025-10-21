@@ -688,4 +688,87 @@ class inotify : public descriptor
 
 }  // namespace tbd
 
+/****************************************************************************
+ * io_uring
+ */
+#include <liburing.h>
+namespace tbd {
+class iouring
+{
+  public:
+    struct callback
+    {
+        void* data = nullptr;
+        virtual ~callback() noexcept = default;
+        virtual void operator()(int res) = 0;
+    };
+
+    explicit iouring(size_t entries = 256)
+    {
+        if (::io_uring_queue_init(entries, &ring_, 0) < 0) {
+            detail::throw_syserr(errno, "io_uring_queue_init");
+        }
+        eventfd_.set_nonblock();
+        ::io_uring_register_eventfd(&ring_, *eventfd_);
+    }
+
+    ~iouring() noexcept
+    {
+        ::io_uring_queue_exit(&ring_);
+    }
+
+    int handle() const noexcept
+    {
+        return *eventfd_;
+    }
+
+    bool prep_read(const descriptor& fd, void* buffer, size_t size, callback* cb = nullptr)
+    {
+        auto* sqe = ::io_uring_get_sqe(&ring_);
+        if (!sqe) {
+            return false;
+        }
+        ::io_uring_prep_read(sqe, *fd, buffer, size, 0);
+        if (cb) {
+            ::io_uring_sqe_set_data(sqe, cb);
+        }
+        return true;
+    }
+
+    void submit()
+    {
+        ::io_uring_submit(&ring_);
+    }
+
+    void wait_cqe()
+    {
+        struct io_uring_cqe* cqe;
+        if (::io_uring_wait_cqe(&ring_, &cqe) < 0) {
+            detail::throw_syserr(errno, "io_uring_wait_cqe");
+        }
+    }
+
+    void foreach_cqe()
+    {
+        unsigned head;
+        struct io_uring_cqe* cqe;
+        io_uring_for_each_cqe(&ring_, head, cqe)
+        {
+            if (auto* cb = (callback*)::io_uring_cqe_get_data(cqe)) {
+                (*cb)(cqe->res);
+            }
+            ::io_uring_cqe_seen(&ring_, cqe);
+        }
+
+        // consume eventfd
+        (void)eventfd_.read();
+    }
+
+  private:
+    struct io_uring ring_;
+    eventfd eventfd_;
+};
+
+}  // namespace tbd
+
 #endif
