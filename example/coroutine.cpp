@@ -31,6 +31,7 @@ void basic()
     co1.resume();
     printf(" -> ");
     co2.resume();
+    assert(!co2);
 
     auto co3 = co_env.spawn([](const auto& yield) {
         puts("co3 start");

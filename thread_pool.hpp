@@ -15,7 +15,7 @@ namespace tbd {
 
 class thread_pool
 {
-    class any_task
+    class task
     {
         struct concept
         {
@@ -40,12 +40,12 @@ class thread_pool
 
       public:
         template <typename F>
-        explicit any_task(F&& f)
+        explicit task(F&& f)
             : fp_(std::make_unique<model<F>>(std::move(f)))
         {
         }
-        any_task(any_task&&) noexcept = default;
-        any_task& operator=(any_task&&) noexcept = default;
+        task(task&&) noexcept = default;
+        task& operator=(task&&) noexcept = default;
         void operator()()
         {
             fp_->invoke();
@@ -132,7 +132,7 @@ class thread_pool
   private:
     bool running_;
     std::vector<std::thread> workers_;
-    std::deque<any_task> taskq_;
+    std::deque<task> taskq_;
     std::mutex mtx_;
     std::condition_variable cv_;
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL

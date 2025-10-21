@@ -1,29 +1,28 @@
 #ifndef EVENT_ENGINE_HPP_
 #define EVENT_ENGINE_HPP_
 
-#include <assert.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
-#ifdef EVENT_ENGINE_VERBOSE
-#    include <stdio.h>
-#    include <sys/syscall.h>
-#endif
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <system_error>
 #include <unordered_set>
-#ifdef EVENT_ENGINE_VERBOSE
-#    include <sstream>
-#endif
-#include <list>
+
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
+#include <sstream>
+#include <stdio.h>
+#include <sys/syscall.h>
+#endif  // }}}
 
 namespace tbd {
 
@@ -185,7 +184,8 @@ class engine
 
             bool operator<(const timer_event& rhs) const noexcept
             {
-                return deadline_ms < rhs.deadline_ms;
+                return (deadline_ms != rhs.deadline_ms) ? (deadline_ms < rhs.deadline_ms)
+                                                        : (ev < rhs.ev);
             }
         };
 
@@ -210,7 +210,10 @@ class engine
                 return;
             }
 
-            event_list_.emplace(timer_event{ev, now_ms() + timeout_ms});
+            [[maybe_unused]] auto it = event_list_.emplace(timer_event{ev, now_ms() + timeout_ms});
+#ifdef EVENT_ENGINE_USE_TIMER_MAP
+            event_pos_.emplace(ev, it);
+#endif
             dump(__func__, ev);
         }
 
@@ -226,6 +229,9 @@ class engine
             auto it = event_list_.begin();
             auto* ev = it->ev;
             event_list_.erase(it);
+#ifdef EVENT_ENGINE_USE_TIMER_MAP
+            event_pos_.erase(ev);
+#endif
             dump(__func__, ev);
             return ev;
         }
@@ -237,6 +243,9 @@ class engine
 
       private:
         std::multiset<timer_event> event_list_;
+#ifdef EVENT_ENGINE_USE_TIMER_MAP
+        std::unordered_map<void*, decltype(event_list_.begin())> event_pos_;
+#endif
 
         static int64_t now_ms() noexcept
         {
@@ -246,6 +255,16 @@ class engine
 
         void remove_(void* ev)
         {
+#ifdef EVENT_ENGINE_USE_TIMER_MAP
+            {
+                auto it = event_pos_.find(ev);
+                if (it != event_pos_.end()) {
+                    event_list_.erase(it->second);
+                    event_pos_.erase(it);
+                }
+                return;
+            }
+#endif
             auto it = std::find_if(event_list_.begin(), event_list_.end(),
                                    [ev](auto& te) { return te.ev == ev; });
             if (it != event_list_.end()) {
@@ -257,7 +276,7 @@ class engine
         {
             (void)func;
             (void)ev;
-#if defined(EVENT_ENGINE_VERBOSE) && (EVENT_ENGINE_VERBOSE >= 2)
+#if defined(EVENT_ENGINE_VERBOSE) && (EVENT_ENGINE_VERBOSE >= 2)  // {{{
             bool omit = true;
             unsigned max_on_omit = 20;
             std::ostringstream ss;
@@ -277,7 +296,7 @@ class engine
             ss << ((omit && len > max_on_omit) ? " ..." : "") << " } (len [" << len << "], max ["
                << max_deadline << "]) ***";
             puts(ss.str().c_str());
-#endif
+#endif  // }}}
         }
     };  // class timer_list
 
@@ -338,7 +357,7 @@ class engine
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
         requestq_.emplace_back(event_request{EV_TERM, nullptr, 0});
-        eventfd_write(eventfd_, 1);
+        notify();
     }
 
     void run_next()
@@ -370,17 +389,17 @@ class engine
                 }
 
                 handle_event((event*)eev[i].data.ptr);
-#ifdef EVENT_ENGINE_VERBOSE
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
                 log += "fd=" + std::to_string(((event*)eev[i].data.ptr)->handle()) + " ";
-#endif
+#endif  // }}}
             }
-#ifdef EVENT_ENGINE_VERBOSE
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
             ndups_ = (changed_ || log != prev_log_) ? 0 : ndups_ + 1;
             if (!log.empty() && ndups_ < 3) {
                 printf(" *** epoll wakeup (n=%d,c=%d): %s***\n", nfds, changed_, log.c_str());
             }
             prev_log_ = log;
-#endif
+#endif  // }}}
         }
 
         changed_ = handle_request();
@@ -403,26 +422,26 @@ class engine
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
         requestq_.emplace_back(event_request{EV_ADD, ev, timeout_ms});
-        eventfd_write(eventfd_, 1);
+        notify();
     }
 
     void register_timer(event* ev, int timeout_ms)
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
         requestq_.emplace_back(event_request{EV_TIM, ev, timeout_ms});
-        eventfd_write(eventfd_, 1);
+        notify();
     }
 
     void deregister(event* ev)
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
         requestq_.emplace_back(event_request{EV_DEL, ev, 0});
-        eventfd_write(eventfd_, 1);
+        notify();
     }
 
     void notify()
     {
-        eventfd_write(eventfd_, 1);
+        ::eventfd_write(eventfd_, 1);
     }
 
     /**
@@ -437,36 +456,44 @@ class engine
             auto req = std::move(requestq_.front());
             requestq_.pop_front();
 
-            if (req.op == EV_ADD) {
+            switch (req.op) {
+            case EV_ADD:
                 add_event(req.ev, req.timeout_ms);
                 req.ev->set_ready(false);
-            } else if (req.op == EV_DEL) {
+                break;
+
+            case EV_DEL:
                 delete_event(req.ev);
                 req.ev->set_ready(false);
-            } else if (req.op == EV_TIM) {
-#ifdef EVENT_ENGINE_VERBOSE
+                break;
+
+            case EV_TIM:
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
                 printf(" *** timer.add: fd=%d, ev=%p, timeout_ms=%d ***\n", req.ev->handle(),
                        req.ev, req.timeout_ms);
-#endif
+#endif  // }}}
                 timerq_.add(req.ev, req.timeout_ms);
                 req.ev->set_ready(false);
-            } else if (req.op == EV_TERM) {
+                break;
+
+            case EV_TERM:
                 throw terminate{};
-            } else {
-                // ignore
+
+            default:
+                break;  // ignore
             }
         }
 
         eventfd_t value;
-        eventfd_read(eventfd_, &value);
+        ::eventfd_read(eventfd_, &value);
         return changed;
     }
 
     void add_event(event* ev, int timeout_ms = 0)
     {
-#ifdef EVENT_ENGINE_VERBOSE
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
         printf(" *** add_event: fd=%d, ev=%p, timeout_ms=%d ***\n", ev->handle(), ev, timeout_ms);
-#endif
+#endif  // }}}
         struct epoll_event eev = {};
         eev.events = ev->flags();
         eev.data.ptr = ev;
@@ -489,9 +516,9 @@ class engine
 
     void delete_event(event* ev)
     {
-#ifdef EVENT_ENGINE_VERBOSE
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
         printf(" *** delete_event: fd=%d, ev=%p ***\n", ev->handle(), ev);
-#endif
+#endif  // }}}
         bool enoent = false;
         int ret = ::epoll_ctl(epollfd_, EPOLL_CTL_DEL, ev->handle(), nullptr);
         if (ret < 0) {
@@ -512,25 +539,31 @@ class engine
         log.reserve(256);
         [[maybe_unused]] auto before = pendingq_.size();
         for (auto it = pendingq_.begin(); it != pendingq_.end();) {
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
             log += "fd=" + std::to_string((*it)->handle());
+#endif  // }}}
             if (exec_bh(*it)) {
                 it = pendingq_.erase(it);
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
                 log += "(o) ";
+#endif  // }}}
             } else {
                 ++it;
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
                 log += "(x) ";
+#endif  // }}}
             }
         }
-#ifdef EVENT_ENGINE_VERBOSE
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
         auto after = pendingq_.size();
         if (before > 0 || before != after) {
             printf(" *** flush_pendings: #pend %lu -> %lu, %s***\n", before, after, log.c_str());
         }
-#endif
+#endif  // }}}
     }
 
     /**
-     * event / timer callback
+     * timer callback
      */
     void handle_timeout()
     {
@@ -542,20 +575,25 @@ class engine
             auto* ev = (event*)timerq_.pop();
             delete_event(ev);
             ev->task()->top_half(ev);
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
             ++n;
             log += "fd=" + std::to_string(ev->handle()) + " ";
+#endif  // }}}
             if (!exec_bh(ev)) {
-#ifdef EVENT_ENGINE_VERBOSE
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
                 printf(" *** handle_timeout: exec_bh failed, fd=%d, ev=%p ***\n", ev->handle(), ev);
-#endif
+#endif  // }}}
                 pendingq_.emplace_back(ev);
             }
         }
-#ifdef EVENT_ENGINE_VERBOSE
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
         printf(" *** event timed out (n=%d): %s***\n", n, log.c_str());
-#endif
+#endif  // }}}
     }
 
+    /**
+     * event callback
+     */
     void handle_event(event* ev)
     {
         if (ev->flags() & EPOLLONESHOT) {
@@ -566,9 +604,9 @@ class engine
         ev->set_ready();
         ev->task()->top_half(ev);
         if (!exec_bh(ev)) {
-#ifdef EVENT_ENGINE_VERBOSE
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
             printf(" *** handle_event: exec_bh failed, fd=%d, ev=%p ***\n", ev->handle(), ev);
-#endif
+#endif  // }}}
         }
     }
 
@@ -604,9 +642,9 @@ void task::exit() noexcept
     *running_ = false;
     bool expected = false;
     if (!pending_->compare_exchange_strong(expected, false)) {
-#ifdef EVENT_ENGINE_VERBOSE
+#ifdef EVENT_ENGINE_VERBOSE  // {{{
         printf(" *** task::exit: notify to engine ***\n");
-#endif
+#endif  // }}}
         engine_->notify();
     }
 }
@@ -648,3 +686,5 @@ struct multithreaded_engine : public engine
 }  // namespace tbd
 
 #endif
+
+/* vi: set foldmethod=marker: */

@@ -6,7 +6,6 @@
 #define SOCKET_HPP_
 
 #include <arpa/inet.h>
-#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -15,16 +14,17 @@
 #include <sys/types.h>
 #include <unistd.h>
 #ifdef SOCKET_USE_OPENSSL
-#    include <openssl/err.h>
-#    include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #endif
 
 #ifdef SOCKET_VERBOSE
-#    include <stdio.h>
-#    include <sys/syscall.h>
+#include <stdio.h>
+#include <sys/syscall.h>
 #endif
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <memory>
 #include <regex>
@@ -189,16 +189,21 @@ class socket_base
         return std::exchange(raw_fd_, -1);
     }
 
-    virtual int native_handle() const noexcept
+    virtual int handle() const noexcept
     {
         return raw_fd_;
     }
 
+    int operator*() const noexcept
+    {
+        return handle();
+    }
+
     int set_nonblock(bool set = true) const
     {
-        int old_flags = SYSCALL(::fcntl, native_handle(), F_GETFL);
+        int old_flags = SYSCALL(::fcntl, handle(), F_GETFL);
         if ((set && !(old_flags & O_NONBLOCK)) || (!set && (old_flags & O_NONBLOCK))) {
-            SYSCALL(::fcntl, native_handle(), F_SETFL,
+            SYSCALL(::fcntl, handle(), F_SETFL,
                     (set ? (old_flags | O_NONBLOCK) : (old_flags & ~O_NONBLOCK)));
         }
         return old_flags;
@@ -210,7 +215,7 @@ class socket_base
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = ipaddr.empty() ? INADDR_ANY : inet_addr(ipaddr.data());
         addr.sin_port = htons(port);
-        SYSCALL(::bind, native_handle(), (const struct sockaddr*)&addr, sizeof(addr));
+        SYSCALL(::bind, handle(), (const struct sockaddr*)&addr, sizeof(addr));
     }
 
     void setsockopt(int so_optname, int val) const
@@ -227,7 +232,7 @@ class socket_base
     {
         struct sockaddr_in addr;
         socklen_t addrlen = sizeof(addr);
-        SYSCALL(::getsockname, native_handle(), (struct sockaddr*)&addr, &addrlen);
+        SYSCALL(::getsockname, handle(), (struct sockaddr*)&addr, &addrlen);
         char addr_s[20] = {0};
         if (!::inet_ntop(AF_INET, &addr.sin_addr, addr_s, sizeof(addr_s))) {
             THROW_SYSERR(errno, "inet_ntop");
@@ -263,13 +268,13 @@ class socket_base
   private:
     void setsockopt_(int level, int optname, int val) const
     {
-        SYSCALL(::setsockopt, native_handle(), level, optname, &val, (socklen_t)sizeof(val));
+        SYSCALL(::setsockopt, handle(), level, optname, &val, (socklen_t)sizeof(val));
     }
 
     bool poll_(int events, int timeout_ms = 0) const
     {
         struct pollfd fds;
-        fds.fd = native_handle();
+        fds.fd = handle();
         fds.events = events;
         fds.revents = 0;
         int nfds = SYSCALL(::poll, &fds, 1, timeout_ms);
@@ -344,7 +349,7 @@ class io_socket_model : virtual public io_socket_concept
     {
         struct sockaddr_in addr;
         socklen_t addrlen = sizeof(addr);
-        SYSCALL(::getpeername, native_handle(), (struct sockaddr*)&addr, &addrlen);
+        SYSCALL(::getpeername, handle(), (struct sockaddr*)&addr, &addrlen);
         char addr_s[20] = {0};
         if (!::inet_ntop(AF_INET, &addr.sin_addr, addr_s, sizeof(addr_s))) {
             THROW_SYSERR(errno, "inet_ntop");
@@ -488,7 +493,7 @@ class tcp_socket : public io_socket_model<int>
 
     int io_handle() const noexcept override
     {
-        return native_handle();
+        return handle();
     }
 
     friend class tbd::tcp_server;
@@ -552,9 +557,13 @@ class io_socket
     {
         return impl_->release();
     }
-    int native_handle() const noexcept
+    int handle() const noexcept
     {
-        return impl_->native_handle();
+        return impl_->handle();
+    }
+    int operator*() const noexcept
+    {
+        return impl_->handle();
     }
     int set_nonblock(bool set = true) const
     {
@@ -720,7 +729,7 @@ class tcp_client
         addr.sin_port = htons(port_);
         addr.sin_addr.s_addr = (uint32_t)ipaddr;
 
-        int rv = ::connect(native_handle(), (const struct sockaddr*)&addr, sizeof(addr));
+        int rv = ::connect(handle(), (const struct sockaddr*)&addr, sizeof(addr));
         return (rv == 0) ? 0 : errno;
     }
 
@@ -728,7 +737,7 @@ class tcp_client
     {
         int err;
         socklen_t len = sizeof(err);
-        SYSCALL(::getsockopt, native_handle(), SOL_SOCKET, SO_ERROR, &err, &len);
+        SYSCALL(::getsockopt, handle(), SOL_SOCKET, SO_ERROR, &err, &len);
         if (err > 0) {
             conn_state_ = state::unresolved;
             THROW_SYSERR(err, "connect");
@@ -745,7 +754,7 @@ class tcp_server : public acceptor
         raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
         setsockopt(SO_REUSEADDR, 1);
         bind(addr, port);
-        SYSCALL(::listen, native_handle(), backlog);
+        SYSCALL(::listen, handle(), backlog);
     }
 
     explicit tcp_server(uint16_t port, int backlog = 1024)
@@ -791,7 +800,7 @@ class tcp_server : public acceptor
     {
         struct sockaddr_in peer;
         socklen_t addrlen = sizeof(peer);
-        int new_fd = ::accept4(native_handle(), (struct sockaddr*)&peer, &addrlen, SOCK_NONBLOCK);
+        int new_fd = ::accept4(handle(), (struct sockaddr*)&peer, &addrlen, SOCK_NONBLOCK);
         return (new_fd >= 0) ? new_fd : -errno;
     }
 };
@@ -1196,12 +1205,12 @@ class tls_socket
 
     void print_cipher() const noexcept
     {
-#    ifdef SOCKET_VERBOSE
+#ifdef SOCKET_VERBOSE
         const char* version = ::SSL_get_version(ssl_.get());
         const char* cipher = ::SSL_CIPHER_get_name(::SSL_get_current_cipher(ssl_.get()));
         printf(" *** [%04ld] %s Handshake: %s, %s ***\n", syscall(SYS_gettid),
                (is_server_ ? "Server" : "Client"), version, cipher);
-#    endif
+#endif
     }
 
     friend class tbd::tls_server;
@@ -1219,7 +1228,7 @@ class tls_client
         , tcp_(peer, port)
     {
         assert(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_client_method());
-        ssl_.set_fd(tcp_.native_handle());
+        ssl_.set_fd(tcp_.handle());
     }
 
     void close() noexcept override
@@ -1227,9 +1236,9 @@ class tls_client
         tcp_.close();
     }
 
-    int native_handle() const noexcept override
+    int handle() const noexcept override
     {
-        return tcp_.native_handle();
+        return tcp_.handle();
     }
 
     void connect(int timeout_ms = -1) override
@@ -1312,9 +1321,9 @@ class tls_server
         tcp_.close();
     }
 
-    int native_handle() const noexcept override
+    int handle() const noexcept override
     {
-        return tcp_.native_handle();
+        return tcp_.handle();
     }
 
     io_socket accept(int timeout_ms = -1) override

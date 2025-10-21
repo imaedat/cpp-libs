@@ -1,19 +1,19 @@
 #ifndef COROUTINE_HPP_
 #define COROUTINE_HPP_
 
-#include <assert.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/mman.h>
 #include <ucontext.h>
 #include <unistd.h>
 
+#include <cassert>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <optional>
 #include <system_error>
 
 #ifndef COROUTINE_STACK_SIZE
-#    define COROUTINE_STACK_SIZE (8 * 1024)
+#define COROUTINE_STACK_SIZE (8 * 1024)
 #endif
 
 namespace tbd {
@@ -102,6 +102,11 @@ class coroutine_env_tmpl
                 ::free(stack_);
                 stack_ = nullptr;
             }
+        }
+
+        explicit operator bool() const noexcept
+        {
+            return !finished_;
         }
 
         gen_type resume(ret_type&& r = {})
@@ -222,13 +227,9 @@ class coroutine_env_tmpl
     gen_type resume(coroutine* co, ret_type&& r = {})
     {
         assert(!current_);
-
         if (co->finished_) {
-#ifdef COROUTINE_EXCEPTION_AGAINST_FINISHED
-            throw std::invalid_argument("coroutine_env::resume: coroutine already finished");
-#else
+            assert(!co->finished_);
             return std::nullopt;
-#endif
         }
 
         co->value_ = std::move(r);
