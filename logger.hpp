@@ -39,11 +39,11 @@ class logger
         : pid_(getpid())
         , proc_(proc)
         , max_msgs_(max_msg)
+        , path_(dir)
     {
         std::filesystem::create_directories(dir);
-        std::string path(dir);
-        path.append("/").append(filename);
-        fp_ = ::fopen(path.data(), "a");
+        path_.append("/").append(filename);
+        fp_ = ::fopen(path_.c_str(), "a");
         if (!fp_) {
             throw std::system_error(errno, std::generic_category(), "logger");
         }
@@ -107,23 +107,22 @@ class logger
 
     void flush()
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
-        msgq_.emplace_back(request(req_type::flush));
-        cv_.notify_one();
+        ctl(req_type::flush);
+    }
+
+    void rotate()
+    {
+        ctl(req_type::rotate);
     }
 
     void stop()
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
-        msgq_.emplace_back(request(req_type::stop));
-        cv_.notify_one();
+        ctl(req_type::stop);
     }
 
     void force_stop()
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
-        msgq_.emplace_front(request(req_type::stop));  // front
-        cv_.notify_one();
+        ctl(req_type::stop, true);
     }
 
   private:
@@ -131,7 +130,7 @@ class logger
     {
         log = 1,
         flush,
-        rotate,  // TODO
+        rotate,
         stop,
     };
     struct request
@@ -155,6 +154,7 @@ class logger
     std::string proc_;
     std::atomic<enum level> level_{level::info};
     size_t max_msgs_;
+    std::string path_;
     FILE* fp_ = nullptr;
     std::thread writer_;
     std::deque<request> msgq_;
@@ -198,6 +198,17 @@ class logger
         }
     }
 
+    void ctl(req_type type, bool force = false)
+    {
+        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        if (force) {
+            msgq_.emplace_front(request(type));
+        } else {
+            msgq_.emplace_back(request(type));
+        }
+        cv_.notify_one();
+    }
+
     void writer()
     {
         std::unique_lock<decltype(mtx_)> lk(mtx_);
@@ -217,6 +228,10 @@ class logger
                 ::fflush(fp_);
                 break;
 
+            case req_type::rotate:
+                log_rotate();
+                break;
+
             case req_type::stop:
                 goto stop;
 
@@ -228,6 +243,7 @@ class logger
         }
 
     stop:
+        ::fflush(fp_);
         ::fclose(fp_);
     }
 
@@ -241,6 +257,28 @@ class logger
                   tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
                   req.timestamp.tv_nsec / 1000, proc_.c_str(), pid_, req.tid,
                   level_s[(uint8_t)req.level], req.message.c_str());
+    }
+
+    void log_rotate()
+    {
+        auto now = ::time(nullptr);
+        struct tm tm = {};
+        ::localtime_r(&now, &tm);
+        char suffix[16] = {0};
+        strftime(suffix, 15, "-%F", &tm);
+        auto rotate_path = path_;
+        rotate_path.append(suffix);
+        ::fflush(fp_);
+        ::fclose(fp_);
+
+        std::error_code ec;
+        std::filesystem::rename(path_, rotate_path, ec);
+        if (ec) {
+            ::fprintf(stderr, "logger: rotate failed: original path = %s, rotate path = %s (%s)\n",
+                      path_.c_str(), rotate_path.c_str(), ec.message().c_str());
+        }
+
+        fp_ = ::fopen(path_.c_str(), "a");
     }
 };
 
