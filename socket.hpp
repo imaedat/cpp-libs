@@ -199,6 +199,11 @@ class socket_base
         return handle();
     }
 
+    explicit operator bool() const noexcept
+    {
+        return handle() >= 0;
+    }
+
     int set_nonblock(bool set = true) const
     {
         int old_flags = SYSCALL(::fcntl, handle(), F_GETFL);
@@ -545,10 +550,6 @@ class io_socket
         return impl_->send(msg, nsent);
     }
 
-    explicit operator bool() const noexcept
-    {
-        return (bool)impl_;
-    }
     void close() noexcept
     {
         impl_->close();
@@ -564,6 +565,10 @@ class io_socket
     int operator*() const noexcept
     {
         return impl_->handle();
+    }
+    explicit operator bool() const noexcept
+    {
+        return impl_ && impl_->operator bool();
     }
     int set_nonblock(bool set = true) const
     {
