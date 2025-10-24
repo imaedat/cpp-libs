@@ -393,8 +393,12 @@ class epollfd : public descriptor
     std::vector<event> wait(int timeout_ms = -1)
     {
         struct epoll_event evs[nregistered_];
+    again:
         auto nfds = ::epoll_wait(*fd_, evs, nregistered_, timeout_ms);
         if (nfds < 0) {
+            if (errno == EINTR) {
+                goto again;
+            }
             detail::throw_syserr(errno, "epoll_wait");
         }
 
@@ -481,8 +485,12 @@ class poll
             fds[i].revents = 0;
         }
 
+    again:
         int nfds = ::poll(fds, watchees_.size(), timeout_ms);
         if (nfds < 0) {
+            if (errno == EINTR) {
+                goto again;
+            }
             detail::throw_syserr(errno, "poll");
         }
 
