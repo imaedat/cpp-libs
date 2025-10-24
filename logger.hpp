@@ -36,16 +36,17 @@ class logger
         trace,
     };
 
-    logger(std::string_view proc, std::string_view filename, std::string_view dir = ".",
-           size_t max_msg = MAX_MSGS)
+    logger(std::string_view proc, std::string_view filepath, size_t max_msg = MAX_MSGS)
         : pid_(getpid())
         , proc_(proc)
+        , filepath_(filepath)
         , max_msgs_(max_msg)
-        , path_(dir)
     {
-        std::filesystem::create_directories(dir);
-        path_.append("/").append(filename);
-        fp_ = ::fopen(path_.c_str(), "a");
+        const auto& dir = filepath_.parent_path();
+        if (!dir.empty()) {
+            std::filesystem::create_directories(dir);
+        }
+        fp_ = ::fopen(filepath_.c_str(), "a");
         if (!fp_) {
             throw std::system_error(errno, std::generic_category(), "logger");
         }
@@ -66,9 +67,15 @@ class logger
         level_ = lv;
     }
 
-    void set_level(int lv)
+    void set_level(std::string_view lvs)
     {
-        set_level((level)lv);
+        set_level(lvs == "fatal"   ? level::fatal
+                  : lvs == "error" ? level::error
+                  : lvs == "warn"  ? level::warn
+                  : lvs == "info"  ? level::info
+                  : lvs == "debug" ? level::debug
+                  : lvs == "trace" ? level::trace
+                                   : level::info);
     }
 
     template <typename... Args>
@@ -154,9 +161,9 @@ class logger
 
     pid_t pid_;
     std::string proc_;
+    std::filesystem::path filepath_;
     std::atomic<enum level> level_{level::info};
     size_t max_msgs_;
-    std::string path_;
     FILE* fp_ = nullptr;
     std::thread writer_;
     std::deque<request> msgq_;
@@ -164,7 +171,7 @@ class logger
     std::condition_variable cv_;
 
     template <typename T>
-    auto pass(T&& value)
+    auto pass(T&& value) const noexcept
     {
         if constexpr (std::is_same<std::decay_t<T>, std::string>::value) {
             return std::forward<T>(value).c_str();
@@ -176,7 +183,7 @@ class logger
     }
 
     template <typename... Args>
-    std::string format(Args&&... args)
+    std::string format(Args&&... args) const
     {
         static constexpr int INITSZ = 512;
         char buf[INITSZ] = {0};
@@ -204,7 +211,7 @@ class logger
         if (lv <= level_) {
             request req(req_type::log);
             ::clock_gettime(CLOCK_REALTIME, &req.timestamp);
-            req.tid = syscall(SYS_gettid);
+            req.tid = ::syscall(SYS_gettid);
             req.level = lv;
             req.message = format(pass(fmt), pass(args)...);
 
@@ -264,7 +271,7 @@ class logger
         ::fclose(fp_);
     }
 
-    void log_msg(request& req)
+    void log_msg(const request& req)
     {
         static constexpr const char* const level_s[] = {"quiet", "fatal", "error", "warn",
                                                         "info",  "debug", "trace"};
@@ -282,20 +289,20 @@ class logger
         struct tm tm = {};
         ::localtime_r(&now, &tm);
         char suffix[16] = {0};
-        strftime(suffix, 15, "-%F", &tm);
-        auto rotate_path = path_;
-        rotate_path.append(suffix);
+        ::strftime(suffix, 15, "-%Y%m%d", &tm);
+        auto rotate_path = filepath_;
+        rotate_path.concat(suffix);
         ::fflush(fp_);
         ::fclose(fp_);
 
         std::error_code ec;
-        std::filesystem::rename(path_, rotate_path, ec);
+        std::filesystem::rename(filepath_, rotate_path, ec);
         if (ec) {
             ::fprintf(stderr, "logger: rotate failed: original path = %s, rotate path = %s (%s)\n",
-                      path_.c_str(), rotate_path.c_str(), ec.message().c_str());
+                      filepath_.c_str(), rotate_path.c_str(), ec.message().c_str());
         }
 
-        fp_ = ::fopen(path_.c_str(), "a");
+        fp_ = ::fopen(filepath_.c_str(), "a");
         assert(fp_);
     }
 };
