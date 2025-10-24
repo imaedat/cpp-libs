@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cassert>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
@@ -26,7 +27,8 @@ class logger
 
     enum class level : uint8_t
     {
-        fatal = 1,
+        quiet = 0,
+        fatal,
         error,
         warn,
         info,
@@ -53,7 +55,7 @@ class logger
 
     ~logger()
     {
-        stop();
+        close();
         if (writer_.joinable()) {
             writer_.join();
         }
@@ -115,14 +117,14 @@ class logger
         ctl(req_type::rotate);
     }
 
-    void stop()
+    void close()
     {
-        ctl(req_type::stop);
+        ctl(req_type::close);
     }
 
-    void force_stop()
+    void force_close()
     {
-        ctl(req_type::stop, true);
+        ctl(req_type::close, true);
     }
 
   private:
@@ -131,7 +133,7 @@ class logger
         log = 1,
         flush,
         rotate,
-        stop,
+        close,
     };
     struct request
     {
@@ -164,9 +166,10 @@ class logger
     template <typename T>
     auto pass(T&& value)
     {
-        if constexpr (std::is_same<std::remove_cv_t<std::remove_reference_t<T>>,
-                                   std::string>::value) {
+        if constexpr (std::is_same<std::decay_t<T>, std::string>::value) {
             return std::forward<T>(value).c_str();
+        } else if constexpr (std::is_same<std::decay_t<T>, std::string_view>::value) {
+            return std::forward<T>(value).data();
         } else {
             return std::forward<T>(value);
         }
@@ -175,21 +178,35 @@ class logger
     template <typename... Args>
     std::string format(Args&&... args)
     {
-        auto size = ::snprintf(nullptr, 0, args...);
-        std::string buf(size + 1, 0);
-        ::snprintf(buf.data(), size + 1, args...);
-        return buf;
+        static constexpr int INITSZ = 512;
+        char buf[INITSZ] = {0};
+        auto result = ::snprintf(buf, INITSZ, args...);
+        if (result <= INITSZ) {
+            return {buf, (size_t)result};
+        }
+
+        std::string s(result + 1, 0);
+        ::snprintf(s.data(), result + 1, args...);
+        s.resize(result);
+        return s;
+    }
+
+    template <typename S,
+              typename = std::enable_if_t<std::is_convertible_v<std::decay_t<S>, std::string_view>>>
+    void log(level lv, S s)
+    {
+        log(lv, "%s", std::string_view(s).data());
     }
 
     template <typename... Args>
-    void log(level lv, Args&&... args)
+    void log(level lv, std::string_view fmt, Args&&... args)
     {
         if (lv <= level_) {
             request req(req_type::log);
             ::clock_gettime(CLOCK_REALTIME, &req.timestamp);
             req.tid = syscall(SYS_gettid);
             req.level = lv;
-            req.message = format(pass(args)...);
+            req.message = format(pass(fmt), pass(args)...);
 
             // TODO max msg
             std::lock_guard<decltype(mtx_)> lk(mtx_);
@@ -232,8 +249,8 @@ class logger
                 log_rotate();
                 break;
 
-            case req_type::stop:
-                goto stop;
+            case req_type::close:
+                goto close;
 
             default:
                 break;
@@ -242,14 +259,14 @@ class logger
             lk.lock();
         }
 
-    stop:
+    close:
         ::fflush(fp_);
         ::fclose(fp_);
     }
 
     void log_msg(request& req)
     {
-        static constexpr const char* const level_s[] = {"dummy", "fatal", "error", "warn",
+        static constexpr const char* const level_s[] = {"quiet", "fatal", "error", "warn",
                                                         "info",  "debug", "trace"};
         struct tm tm = {};
         ::localtime_r(&req.timestamp.tv_sec, &tm);
@@ -279,6 +296,7 @@ class logger
         }
 
         fp_ = ::fopen(path_.c_str(), "a");
+        assert(fp_);
     }
 };
 
