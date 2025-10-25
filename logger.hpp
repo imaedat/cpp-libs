@@ -275,12 +275,14 @@ class logger
     {
         static constexpr const char* const level_s[] = {"quiet", "fatal", "error", "warn",
                                                         "info",  "debug", "trace"};
-        struct tm tm = {};
-        ::localtime_r(&req.timestamp.tv_sec, &tm);
-        ::fprintf(fp_, "%04d-%02d-%02d %02d:%02d:%02d.%06ld %s[%d:%d] [%s] %s\n", tm.tm_year + 1900,
-                  tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
-                  req.timestamp.tv_nsec / 1000, proc_.c_str(), pid_, req.tid,
-                  level_s[(uint8_t)req.level], req.message.c_str());
+        if (req.level <= level_) {
+            struct tm tm = {};
+            ::localtime_r(&req.timestamp.tv_sec, &tm);
+            ::fprintf(fp_, "%04d-%02d-%02d %02d:%02d:%02d.%06ld %s[%d:%d] [%s] %s\n",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
+                      tm.tm_sec, req.timestamp.tv_nsec / 1000, proc_.c_str(), pid_, req.tid,
+                      level_s[(uint8_t)req.level], req.message.c_str());
+        }
     }
 
     void log_rotate()
