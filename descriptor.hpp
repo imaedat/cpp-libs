@@ -549,12 +549,15 @@ class memfd : public descriptor
 class signalfd : public descriptor
 {
   public:
-    explicit signalfd(const std::vector<int>& signals)
+    explicit signalfd(const std::vector<int>& signals, bool block_on_ctor = false)
     {
         sigset_t mask;
         ::sigemptyset(&mask);
         for (auto sig : signals) {
             ::sigaddset(&mask, sig);
+        }
+        if (block_on_ctor && ::pthread_sigmask(SIG_BLOCK, &mask, nullptr) < 0) {
+            detail::throw_syserr(errno, "pthread_sigmask");
         }
         fd_ = detail::fd_wrapper(::signalfd(-1, &mask, 0));
     }
