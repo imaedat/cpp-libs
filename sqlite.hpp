@@ -65,9 +65,9 @@ class sqlite
         }
     }
 
-    void exec(std::string_view sql) const
+    int64_t exec(std::string_view sql) const
     {
-        exec_(sql, nullptr, nullptr);
+        return exec_(sql, nullptr, nullptr);
     }
 
     int64_t count(std::string_view sql) const
@@ -91,7 +91,7 @@ class sqlite
   private:
     sqlite3* db_ = nullptr;
 
-    void exec_(std::string_view sql, int (*cb)(void*, int, char**, char**), void* args) const
+    int64_t exec_(std::string_view sql, int (*cb)(void*, int, char**, char**), void* args) const
     {
         char* mbuf = nullptr;
         int ec = sqlite3_exec(db_, sql.data(), cb, args, &mbuf);
@@ -103,6 +103,7 @@ class sqlite
             }
             throw std::runtime_error("sqlite3_exec: " + msg);
         }
+        return sqlite3_changes64(db_);
     }
 
     void close() noexcept
@@ -160,11 +161,12 @@ class sqlite
             rollback();
         }
 
-        void exec(std::string_view sql) const
+        int64_t exec(std::string_view sql) const
         {
             if (!completed_) {
-                db_.exec(sql);
+                return db_.exec(sql);
             }
+            return -1;
         }
 
         int64_t count(std::string_view sql) const
