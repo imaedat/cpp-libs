@@ -383,6 +383,20 @@ class epollfd : public descriptor
         --nregistered_;
     }
 
+    void del(const descriptor& desc, std::error_code& ec) noexcept
+    {
+        del(*desc, ec);
+    }
+
+    void del(int fd, std::error_code& ec) noexcept
+    {
+        if (::epoll_ctl(*fd_, EPOLL_CTL_DEL, fd, nullptr) < 0) {
+            ec = std::error_code(errno, std::generic_category());
+            return;
+        }
+        --nregistered_;
+    }
+
     struct event
     {
         uint32_t events = 0;
@@ -390,7 +404,7 @@ class epollfd : public descriptor
         void* ptr = nullptr;
     };
 
-    std::vector<event> wait(int timeout_ms = -1)
+    std::vector<event> wait(int timeout_ms = -1) const
     {
         struct epoll_event evs[nregistered_];
     again:
@@ -474,7 +488,7 @@ class poll
         short revents = 0;
     };
 
-    std::vector<revent> wait(int timeout_ms = -1)
+    std::vector<revent> wait(int timeout_ms = -1) const
     {
         struct pollfd fds[watchees_.size()];
         auto it = watchees_.cbegin();
