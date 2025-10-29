@@ -65,6 +65,54 @@ class sqlite
         }
     }
 
+    struct raw_buffer
+    {
+        const void* ptr;
+        size_t size;
+    };
+    using param = std::variant<int64_t, std::string, raw_buffer>;
+
+  private:
+    struct param_visitor
+    {
+        explicit param_visitor(sqlite3_stmt* s)
+            : stmt_(s)
+            , index_(0)
+        {
+        }
+
+        void operator()(const int64_t& num)
+        {
+            sqlite3_bind_int64(stmt_, ++index_, num);
+        }
+        void operator()(const std::string& str)
+        {
+            sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_STATIC);
+        }
+        void operator()(const raw_buffer& buf)
+        {
+            sqlite3_bind_blob(stmt_, ++index_, buf.ptr, buf.size, SQLITE_STATIC);
+        }
+
+      private:
+        sqlite3_stmt* stmt_ = nullptr;
+        size_t index_ = 0;
+    };
+
+  public:
+    int64_t exec(std::string_view sql, const std::vector<param>& params) const
+    {
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db_, sql.data(), -1, &stmt, nullptr);
+        param_visitor v(stmt);
+        for (const auto& p : params) {
+            std::visit(v, p);
+        }
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return sqlite3_changes64(db_);
+    }
+
     int64_t exec(std::string_view sql) const
     {
         return exec_(sql, nullptr, nullptr);
