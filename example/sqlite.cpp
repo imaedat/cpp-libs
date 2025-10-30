@@ -107,7 +107,7 @@ int main()
     puts("---");
 
     // cursor style
-    auto cur = db.cursor_for("select * from testtab order by name;");
+    auto cur = db.cursor_for("select id, name, timestamp from testtab order by name;");
     while (true) {
         auto row_opt = cur.next();
         if (!row_opt) {
@@ -115,9 +115,9 @@ int main()
         }
         const auto& row = *row_opt;
         cout << "#cols=" << row.column_count() << ": ";
-        for (const auto& field : row) {
-            cout << field.name() << "=" << field.to_s() << " ";
-        }
+        cout << row[0].name() << "=" << row[0].to_i() << " ";
+        cout << row[1].name() << "=" << row[1].to_s() << " ";
+        cout << row[2].name() << "=" << row[2].to_s() << " ";
         cout << endl;
     }
 

@@ -1,15 +1,17 @@
 #ifndef SQLITE_HPP_
 #define SQLITE_HPP_
 
+#include <sqlite3.h>
+#include <string.h>
+
 #include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
-
-#include <sqlite3.h>
 
 namespace tbd {
 
@@ -70,11 +72,15 @@ class sqlite
         const void* ptr;
         size_t size;
     };
-    using param = std::variant<int64_t, std::string, raw_buffer>;
+    using param = std::variant<int64_t, double, std::string, raw_buffer>;
 
   private:
-    struct param_visitor
+    class param_visitor
     {
+        sqlite3_stmt* stmt_ = nullptr;
+        size_t index_ = 0;
+
+      public:
         explicit param_visitor(sqlite3_stmt* s)
             : stmt_(s)
             , index_(0)
@@ -85,6 +91,10 @@ class sqlite
         {
             sqlite3_bind_int64(stmt_, ++index_, num);
         }
+        void operator()(const double& num)
+        {
+            sqlite3_bind_double(stmt_, ++index_, num);
+        }
         void operator()(const std::string& str)
         {
             sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_STATIC);
@@ -93,10 +103,6 @@ class sqlite
         {
             sqlite3_bind_blob(stmt_, ++index_, buf.ptr, buf.size, SQLITE_STATIC);
         }
-
-      private:
-        sqlite3_stmt* stmt_ = nullptr;
-        size_t index_ = 0;
     };
 
   public:
@@ -105,12 +111,10 @@ class sqlite
         sqlite3_stmt* stmt;
         sqlite3_prepare_v2(db_, sql.data(), -1, &stmt, nullptr);
         param_visitor v(stmt);
-        for (const auto& p : params) {
-            std::visit(v, p);
-        }
+        std::for_each(params.cbegin(), params.cend(), [&v](const auto& p) { std::visit(v, p); });
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
-        return sqlite3_changes64(db_);
+        return sqlite3_changes(db_);
     }
 
     int64_t exec(std::string_view sql) const
@@ -151,7 +155,7 @@ class sqlite
             }
             throw std::runtime_error("sqlite3_exec: " + msg);
         }
-        return sqlite3_changes64(db_);
+        return sqlite3_changes(db_);
     }
 
     void close() noexcept
@@ -266,6 +270,7 @@ class sqlite
     /************************************************************************
      * cursor
      */
+    using column_types = std::variant<int64_t, double, char*, std::pair<const void*, int>>;
     class cursor
     {
       public:
@@ -306,10 +311,32 @@ class sqlite
 
             auto ncols = sqlite3_data_count(stmt_);
             const char* names[ncols];
-            const unsigned char* values[ncols];
+            column_types values[ncols];
             for (auto i = 0; i < ncols; ++i) {
                 names[i] = sqlite3_column_name(stmt_, i);
-                values[i] = sqlite3_column_text(stmt_, i);
+
+                switch (sqlite3_column_type(stmt_, i)) {
+                case SQLITE_INTEGER: {
+                    values[i] = (int64_t)sqlite3_column_int64(stmt_, i);
+                    break;
+                }
+                case SQLITE_FLOAT: {
+                    values[i] = sqlite3_column_double(stmt_, i);
+                    break;
+                }
+                case SQLITE_TEXT: {
+                    values[i] = (char*)sqlite3_column_text(stmt_, i);
+                    break;
+                }
+                case SQLITE_BLOB: {
+                    values[i] = std::make_pair(sqlite3_column_blob(stmt_, i),
+                                               sqlite3_column_bytes(stmt_, i));
+                    break;
+                }
+                case SQLITE_NULL:
+                default:
+                    break;
+                }
             }
             return row(ncols, names, values);
         }
@@ -338,11 +365,11 @@ class sqlite
         std::vector<field> fields_;
         using iterator = typename decltype(fields_)::const_iterator;
 
-        row(size_t ncols, const char** names, const unsigned char** values)
+        row(size_t ncols, const char** names, const column_types* values)
         {
             fields_.reserve(ncols);
             for (size_t i = 0; i < ncols; ++i) {
-                field f((const char*)names[i], (const char*)values[i]);
+                field f(names[i], values[i]);
                 fields_.push_back(std::move(f));
             }
         }
@@ -387,35 +414,59 @@ class sqlite
      */
     class field
     {
+        using field_types = std::variant<int64_t, double, std::string, std::vector<uint8_t>>;
+
       public:
         const std::string& name() const noexcept
         {
             return name_;
         }
 
-        const std::string& to_s() const noexcept
-        {
-            return value_;
-        }
-
         int64_t to_i() const
         {
-            return std::stoll(value_);
+            return std::get<int64_t>(value_);
         }
 
         double to_f() const
         {
-            return std::stod(value_);
+            return std::get<double>(value_);
+        }
+
+        const std::string& to_s() const
+        {
+            return std::get<std::string>(value_);
+        }
+
+        const std::vector<uint8_t>& to_b() const
+        {
+            return std::get<std::vector<uint8_t>>(value_);
         }
 
       private:
         std::string name_;
-        std::string value_;
+        field_types value_;
 
-        field(const char* name, const char* value)
+        explicit field(const char* name, const column_types& value)
             : name_(name)
-            , value_(value)
         {
+            switch (value.index()) {
+            case 0:  // int64_t
+                value_ = std::get<0>(value);
+                break;
+            case 1:  // double
+                value_ = std::get<1>(value);
+                break;
+            case 2:  // const char *
+                value_ = std::get<2>(value);
+                break;
+            case 3: {  // pair
+                auto& p = std::get<3>(value);
+                std::vector<uint8_t> v(p.second);
+                ::memcpy(v.data(), p.first, p.second);
+                value_ = std::move(v);
+                break;
+            }
+            }
         }
 
         friend class row;
