@@ -15,6 +15,15 @@
 
 namespace tbd {
 
+namespace {
+void assert_success(int ec, const std::string& fname)
+{
+    if (ec != SQLITE_OK) {
+        throw std::runtime_error(fname + ": " + sqlite3_errstr(ec));
+    }
+}
+}  // namespace
+
 class sqlite
 {
     class transaction;
@@ -22,6 +31,51 @@ class sqlite
     class row;
     class field;
     using query_cb_t = std::function<void(int, char**, char**)>;
+
+    class prepared_statement
+    {
+        sqlite3_stmt* stmt_ = nullptr;
+
+      public:
+        prepared_statement() = default;
+        prepared_statement(const prepared_statement&) = delete;
+        prepared_statement& operator=(const prepared_statement&) = delete;
+        prepared_statement(prepared_statement&& rhs) noexcept
+            : stmt_(std::exchange(rhs.stmt_, nullptr))
+        {
+        }
+        prepared_statement& operator=(prepared_statement&& rhs) noexcept
+        {
+            if (this != &rhs) {
+                finalize();
+                stmt_ = std::exchange(rhs.stmt_, nullptr);
+            }
+            return *this;
+        }
+        ~prepared_statement() noexcept
+        {
+            finalize();
+        }
+
+        sqlite3_stmt* operator*() const noexcept
+        {
+            return stmt_;
+        }
+
+        sqlite3_stmt** addr() noexcept
+        {
+            return &stmt_;
+        }
+
+      private:
+        void finalize() noexcept
+        {
+            if (stmt_) {
+                (void)sqlite3_finalize(stmt_);
+                stmt_ = nullptr;
+            }
+        }
+    };
 
   public:
     explicit sqlite(std::string_view dbfile = ":memory:")
@@ -67,54 +121,23 @@ class sqlite
         }
     }
 
-    struct raw_buffer
-    {
-        const void* ptr;
-        size_t size;
-    };
-    using param = std::variant<int64_t, double, std::string, raw_buffer>;
+    // binding paramter
+    using param = std::variant<int64_t, double, std::string, std::pair<const void*, int>>;
 
-  private:
-    class param_visitor
-    {
-        sqlite3_stmt* stmt_ = nullptr;
-        size_t index_ = 0;
-
-      public:
-        explicit param_visitor(sqlite3_stmt* s)
-            : stmt_(s)
-            , index_(0)
-        {
-        }
-
-        void operator()(const int64_t& num)
-        {
-            sqlite3_bind_int64(stmt_, ++index_, num);
-        }
-        void operator()(const double& num)
-        {
-            sqlite3_bind_double(stmt_, ++index_, num);
-        }
-        void operator()(const std::string& str)
-        {
-            sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_STATIC);
-        }
-        void operator()(const raw_buffer& buf)
-        {
-            sqlite3_bind_blob(stmt_, ++index_, buf.ptr, buf.size, SQLITE_STATIC);
-        }
-    };
-
-  public:
     int64_t exec(std::string_view sql, const std::vector<param>& params) const
     {
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(db_, sql.data(), -1, &stmt, nullptr);
-        param_visitor v(stmt);
-        std::for_each(params.cbegin(), params.cend(), [&v](const auto& p) { std::visit(v, p); });
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+        auto stmt = bind_(sql, params);
+        auto ec = sqlite3_step(*stmt);
+        if (ec != SQLITE_DONE && ec != SQLITE_ROW) {
+            throw std::runtime_error(std::string("sqlite3_step: ") + sqlite3_errstr(ec));
+        }
         return sqlite3_changes(db_);
+    }
+
+    cursor cursor_for(std::string_view sql, const std::vector<param>& params) const
+    {
+        auto stmt = bind_(sql, params);
+        return cursor(std::move(stmt));
     }
 
     int64_t exec(std::string_view sql) const
@@ -135,13 +158,68 @@ class sqlite
         exec_(sql, query_cb, (void*)&user_cb);
     }
 
-    cursor cursor_for(std::string_view query) const
+    cursor cursor_for(std::string_view sql) const
     {
-        return cursor(db_, query);
+        prepared_statement stmt;
+        auto ec = sqlite3_prepare_v2(db_, sql.data(), -1, stmt.addr(), 0);
+        assert_success(ec, "sqlite3_prepare_v2");
+        return cursor(std::move(stmt));
     }
 
   private:
     sqlite3* db_ = nullptr;
+
+    void close() noexcept
+    {
+        if (db_) {
+            sqlite3_close(db_);
+            db_ = nullptr;
+        }
+    }
+
+    class param_visitor
+    {
+        sqlite3_stmt* stmt_ = nullptr;
+        size_t index_ = 0;
+
+      public:
+        explicit param_visitor(sqlite3_stmt* s)
+            : stmt_(s)
+            , index_(0)
+        {
+        }
+
+        void operator()(const int64_t& num)
+        {
+            auto ec = sqlite3_bind_int64(stmt_, ++index_, num);
+            assert_success(ec, "sqlite3_bind_int64");
+        }
+        void operator()(const double& num)
+        {
+            auto ec = sqlite3_bind_double(stmt_, ++index_, num);
+            assert_success(ec, "sqlite3_bind_double");
+        }
+        void operator()(const std::string& str)
+        {
+            auto ec = sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_STATIC);
+            assert_success(ec, "sqlite3_bind_text");
+        }
+        void operator()(const std::pair<const void*, int>& blob)
+        {
+            auto ec = sqlite3_bind_blob(stmt_, ++index_, blob.first, blob.second, SQLITE_STATIC);
+            assert_success(ec, "sqlite3_bind_blob");
+        }
+    };
+
+    prepared_statement bind_(std::string_view sql, const std::vector<param>& params) const
+    {
+        prepared_statement stmt;
+        auto ec = sqlite3_prepare_v2(db_, sql.data(), -1, stmt.addr(), 0);
+        assert_success(ec, "sqlite3_prepare_v2");
+        param_visitor v(*stmt);
+        std::for_each(params.cbegin(), params.cend(), [&v](const auto& p) { std::visit(v, p); });
+        return stmt;
+    }
 
     int64_t exec_(std::string_view sql, int (*cb)(void*, int, char**, char**), void* args) const
     {
@@ -156,14 +234,6 @@ class sqlite
             throw std::runtime_error("sqlite3_exec: " + msg);
         }
         return sqlite3_changes(db_);
-    }
-
-    void close() noexcept
-    {
-        if (db_) {
-            sqlite3_close(db_);
-            db_ = nullptr;
-        }
     }
 
     static int count_cb(void* count, int ncolumns, char** values, char** names) noexcept
@@ -211,6 +281,14 @@ class sqlite
         ~transaction() noexcept
         {
             rollback();
+        }
+
+        int64_t exec(std::string_view sql, const std::vector<param>& params) const
+        {
+            if (!completed_) {
+                return db_.exec(sql, params);
+            }
+            return -1;
         }
 
         int64_t exec(std::string_view sql) const
@@ -276,29 +354,13 @@ class sqlite
       public:
         cursor(const cursor&) = delete;
         cursor& operator=(const cursor&) = delete;
-        cursor(cursor&& rhs) noexcept
-            : stmt_(std::exchange(rhs.stmt_, nullptr))
-        {
-        }
-        cursor& operator=(cursor&& rhs) noexcept
-        {
-            if (this != &rhs) {
-                stmt_ = std::exchange(rhs.stmt_, nullptr);
-            }
-            return *this;
-        }
-
-        ~cursor() noexcept
-        {
-            if (stmt_) {
-                sqlite3_finalize(stmt_);
-                stmt_ = nullptr;
-            }
-        }
+        cursor(cursor&& rhs) noexcept = default;
+        cursor& operator=(cursor&& rhs) noexcept = default;
+        ~cursor() noexcept = default;
 
         std::optional<const row> next() const
         {
-            auto ec = sqlite3_step(stmt_);
+            auto ec = sqlite3_step(*stmt_);
 
             if (ec == SQLITE_DONE) {
                 return std::nullopt;
@@ -309,28 +371,28 @@ class sqlite
                 throw std::runtime_error("sqlite3_step: " + msg);
             }
 
-            auto ncols = sqlite3_data_count(stmt_);
+            auto ncols = sqlite3_data_count(*stmt_);
             const char* names[ncols];
             column_types values[ncols];
             for (auto i = 0; i < ncols; ++i) {
-                names[i] = sqlite3_column_name(stmt_, i);
+                names[i] = sqlite3_column_name(*stmt_, i);
 
-                switch (sqlite3_column_type(stmt_, i)) {
+                switch (sqlite3_column_type(*stmt_, i)) {
                 case SQLITE_INTEGER: {
-                    values[i] = (int64_t)sqlite3_column_int64(stmt_, i);
+                    values[i] = (int64_t)sqlite3_column_int64(*stmt_, i);
                     break;
                 }
                 case SQLITE_FLOAT: {
-                    values[i] = sqlite3_column_double(stmt_, i);
+                    values[i] = sqlite3_column_double(*stmt_, i);
                     break;
                 }
                 case SQLITE_TEXT: {
-                    values[i] = (char*)sqlite3_column_text(stmt_, i);
+                    values[i] = (char*)sqlite3_column_text(*stmt_, i);
                     break;
                 }
                 case SQLITE_BLOB: {
-                    values[i] = std::make_pair(sqlite3_column_blob(stmt_, i),
-                                               sqlite3_column_bytes(stmt_, i));
+                    values[i] = std::make_pair(sqlite3_column_blob(*stmt_, i),
+                                               sqlite3_column_bytes(*stmt_, i));
                     break;
                 }
                 case SQLITE_NULL:
@@ -342,15 +404,11 @@ class sqlite
         }
 
       private:
-        sqlite3_stmt* stmt_ = nullptr;
+        prepared_statement stmt_;
 
-        cursor(sqlite3* db, std::string_view query)
+        cursor(prepared_statement&& stmt)
+            : stmt_(std::move(stmt))
         {
-            auto ec = sqlite3_prepare_v2(db, query.data(), -1, &stmt_, 0);
-            if (ec != SQLITE_OK) {
-                std::string msg(sqlite3_errstr(ec));
-                throw std::runtime_error("sqlite3_prepare_v2: " + msg);
-            }
         }
 
         friend class sqlite;
@@ -460,10 +518,10 @@ class sqlite
                 value_ = std::get<2>(value);
                 break;
             case 3: {  // pair
-                auto& p = std::get<3>(value);
-                std::vector<uint8_t> v(p.second);
-                ::memcpy(v.data(), p.first, p.second);
-                value_ = std::move(v);
+                auto& pair = std::get<3>(value);
+                std::vector<uint8_t> blob(pair.second);
+                ::memcpy(blob.data(), pair.first, pair.second);
+                value_ = std::move(blob);
                 break;
             }
             }

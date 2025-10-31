@@ -121,5 +121,20 @@ int main()
         cout << endl;
     }
 
+    puts("---");
+
+    auto cur2 = db.cursor_for("select id, name from testtab where id <= ?;", {2});
+    while (true) {
+        auto row_opt = cur2.next();
+        if (!row_opt) {
+            break;
+        }
+        const auto& row = *row_opt;
+        cout << "#cols=" << row.column_count() << ": ";
+        cout << row[0].name() << "=" << row[0].to_i() << " ";
+        cout << row[1].name() << "=" << row[1].to_s() << " ";
+        cout << endl;
+    }
+
     return 0;
 }
