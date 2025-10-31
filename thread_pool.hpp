@@ -1,6 +1,7 @@
 #ifndef THREAD_POOL_HPP_
 #define THREAD_POOL_HPP_
 
+#include <atomic>
 #include <cassert>
 #include <condition_variable>
 #include <deque>
@@ -57,9 +58,7 @@ class thread_pool
                                          ? std::thread::hardware_concurrency()
                                          : 8))
         : running_(true)
-#ifdef THREAD_POOL_ENABLE_WAIT_ALL
         , noutstandings_(0)
-#endif
     {
         assert(n > 0);
         for (size_t i = 0; i < n; ++i) {
@@ -94,11 +93,14 @@ class thread_pool
             });
         auto fut = task.get_future();
         taskq_.emplace_back([task = std::move(task)]() mutable { task(); });
-#ifdef THREAD_POOL_ENABLE_WAIT_ALL
         ++noutstandings_;
-#endif
         cv_.notify_one();
         return fut;
+    }
+
+    size_t queue_size() const noexcept
+    {
+        return noutstandings_;
     }
 
     void stop(void)
@@ -112,9 +114,7 @@ class thread_pool
     {
         std::lock_guard<decltype(mtx_)> lk(mtx_);
         auto canceled = taskq_.size();
-#ifdef THREAD_POOL_ENABLE_WAIT_ALL
         noutstandings_ -= canceled;
-#endif
         taskq_.clear();
         running_ = false;
         cv_.notify_all();
@@ -135,8 +135,8 @@ class thread_pool
     std::deque<task> taskq_;
     std::mutex mtx_;
     std::condition_variable cv_;
+    std::atomic<size_t> noutstandings_;
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
-    size_t noutstandings_;
     std::condition_variable cv_caller_;
 #endif
 
@@ -158,8 +158,9 @@ class thread_pool
             task();
 
             ul.lock();
+            --noutstandings_;
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
-            if (--noutstandings_ == 0 && taskq_.empty()) {
+            if (noutstandings_ == 0 && taskq_.empty()) {
                 cv_caller_.notify_all();
             }
 #endif
