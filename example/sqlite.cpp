@@ -123,7 +123,7 @@ int main()
 
     puts("---");
 
-    auto cur2 = db.cursor_for("select id, name from testtab where id <= ?;", {2});
+    auto cur2 = db.cursor_for("select id, name from testtab where id <= ? or name = ?;", 3L, "qux");
     while (true) {
         auto row_opt = cur2.next();
         if (!row_opt) {

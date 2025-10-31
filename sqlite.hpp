@@ -124,9 +124,10 @@ class sqlite
     // binding paramter
     using param = std::variant<int64_t, double, std::string, std::pair<const void*, int>>;
 
-    int64_t exec(std::string_view sql, const std::vector<param>& params) const
+    template <typename... Args>
+    int64_t exec(std::string_view sql, Args&&... params) const
     {
-        auto stmt = bind_(sql, params);
+        auto stmt = bind_(sql, std::forward<Args>(params)...);
         auto ec = sqlite3_step(*stmt);
         if (ec != SQLITE_DONE && ec != SQLITE_ROW) {
             throw std::runtime_error(std::string("sqlite3_step: ") + sqlite3_errstr(ec));
@@ -134,9 +135,10 @@ class sqlite
         return sqlite3_changes(db_);
     }
 
-    cursor cursor_for(std::string_view sql, const std::vector<param>& params) const
+    template <typename... Args>
+    cursor cursor_for(std::string_view sql, Args&&... params) const
     {
-        auto stmt = bind_(sql, params);
+        auto stmt = bind_(sql, std::forward<Args>(params)...);
         return cursor(std::move(stmt));
     }
 
@@ -204,6 +206,11 @@ class sqlite
             auto ec = sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_STATIC);
             assert_success(ec, "sqlite3_bind_text");
         }
+        void operator()(std::string&& str)
+        {
+            auto ec = sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_TRANSIENT);
+            assert_success(ec, "sqlite3_bind_text");
+        }
         void operator()(const std::pair<const void*, int>& blob)
         {
             auto ec = sqlite3_bind_blob(stmt_, ++index_, blob.first, blob.second, SQLITE_STATIC);
@@ -211,13 +218,14 @@ class sqlite
         }
     };
 
-    prepared_statement bind_(std::string_view sql, const std::vector<param>& params) const
+    template <typename... Args>
+    prepared_statement bind_(std::string_view sql, Args&&... params) const
     {
         prepared_statement stmt;
         auto ec = sqlite3_prepare_v2(db_, sql.data(), -1, stmt.addr(), 0);
         assert_success(ec, "sqlite3_prepare_v2");
         param_visitor v(*stmt);
-        std::for_each(params.cbegin(), params.cend(), [&v](const auto& p) { std::visit(v, p); });
+        (..., std::visit(v, param(std::forward<Args>(params))));
         return stmt;
     }
 
@@ -283,10 +291,11 @@ class sqlite
             rollback();
         }
 
-        int64_t exec(std::string_view sql, const std::vector<param>& params) const
+        template <typename... Args>
+        int64_t exec(std::string_view sql, Args&&... params) const
         {
             if (!completed_) {
-                return db_.exec(sql, params);
+                return db_.exec(sql, std::forward<Args>(params)...);
             }
             return -1;
         }
