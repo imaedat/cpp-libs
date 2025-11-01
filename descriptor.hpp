@@ -1,8 +1,6 @@
 #ifndef DESCRIPTOR_HPP_
 #define DESCRIPTOR_HPP_
 
-#include <assert.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <mqueue.h>
@@ -21,6 +19,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
+#include <cerrno>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
@@ -330,7 +330,7 @@ class mqueue : public descriptor
 
   private:
     std::string name_;
-    struct mq_attr attr_;
+    struct mq_attr attr_ = {};
 };
 
 /****************************************************************************
@@ -404,22 +404,26 @@ class epollfd : public descriptor
         void* ptr = nullptr;
     };
 
-    std::vector<event> wait(int timeout_ms = -1) const
+    std::vector<event> wait(int timeout_ms = -1)
     {
-        struct epoll_event evs[nregistered_];
-    again:
-        auto nfds = ::epoll_wait(*fd_, evs, nregistered_, timeout_ms);
-        if (nfds < 0) {
-            if (errno == EINTR) {
-                goto again;
-            }
-            detail::throw_syserr(errno, "epoll_wait");
-        }
-
         std::vector<event> events;
-        events.reserve(nfds);
-        for (int i = 0; i < nfds; ++i) {
-            events.emplace_back(event{evs[i].events, evs[i].data.fd, evs[i].data.ptr});
+        if (nregistered_ > 0) {
+            events_.resize(nregistered_);
+
+        again:
+            auto nfds = ::epoll_wait(*fd_, events_.data(), nregistered_, timeout_ms);
+            if (nfds < 0) {
+                if (errno == EINTR) {
+                    goto again;
+                }
+                detail::throw_syserr(errno, "epoll_wait");
+            }
+
+            events.reserve(nfds);
+            for (int i = 0; i < nfds; ++i) {
+                events.emplace_back(
+                    event{events_[i].events, events_[i].data.fd, events_[i].data.ptr});
+            }
         }
         return events;
     }
@@ -429,6 +433,7 @@ class epollfd : public descriptor
 
   private:
     size_t nregistered_ = 0;
+    std::vector<struct epoll_event> events_;
 
     void add_or_mod(int op, int fd, int events, void* ptr)
     {
@@ -490,29 +495,31 @@ class poll
 
     std::vector<revent> wait(int timeout_ms = -1) const
     {
-        struct pollfd fds[watchees_.size()];
-        auto it = watchees_.cbegin();
-        for (size_t i = 0; i < watchees_.size(); ++i, ++it) {
-            const auto& [fd, events] = *it;
-            fds[i].fd = fd;
-            fds[i].events = events;
-            fds[i].revents = 0;
-        }
-
-    again:
-        int nfds = ::poll(fds, watchees_.size(), timeout_ms);
-        if (nfds < 0) {
-            if (errno == EINTR) {
-                goto again;
-            }
-            detail::throw_syserr(errno, "poll");
-        }
-
         std::vector<revent> revents;
-        revents.reserve(nfds);
-        for (size_t i = 0; i < watchees_.size(); ++i) {
-            if (fds[i].revents) {
-                revents.emplace_back(revent{fds[i].fd, fds[i].revents});
+        if (!watchees_.empty()) {
+            std::vector<struct pollfd> fds(watchees_.size());
+            auto it = watchees_.cbegin();
+            for (size_t i = 0; i < watchees_.size(); ++i, ++it) {
+                const auto& [fd, events] = *it;
+                fds[i].fd = fd;
+                fds[i].events = events;
+                fds[i].revents = 0;
+            }
+
+        again:
+            int nfds = ::poll(fds.data(), watchees_.size(), timeout_ms);
+            if (nfds < 0) {
+                if (errno == EINTR) {
+                    goto again;
+                }
+                detail::throw_syserr(errno, "poll");
+            }
+
+            revents.reserve(nfds);
+            for (size_t i = 0; i < watchees_.size(); ++i) {
+                if (fds[i].revents) {
+                    revents.emplace_back(revent{fds[i].fd, fds[i].revents});
+                }
             }
         }
         return revents;
@@ -563,7 +570,7 @@ class memfd : public descriptor
 class signalfd : public descriptor
 {
   public:
-    explicit signalfd(const std::vector<int>& signals, bool block_on_ctor = false)
+    explicit signalfd(const std::vector<int>& signals, bool block_on_ctor = true)
     {
         sigset_t mask;
         ::sigemptyset(&mask);

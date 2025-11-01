@@ -121,6 +121,7 @@ class resolver
         if (::inet_pton(AF_INET, ipaddr.data(), &addr.sin_addr) != 1) {
             return "";
         }
+        addr.sin_family = AF_INET;
         if (::getnameinfo((struct sockaddr*)&addr, sizeof(addr), host, sizeof(host), nullptr, 0,
                           0) != 0) {
             return "";
@@ -690,10 +691,10 @@ class tcp_client
             if (err != 0 && err != EINPROGRESS) {
                 THROW_SYSERR(err, "connect");
             }
-            conn_state_ = state::conneting;
+            conn_state_ = state::connecting;
             [[fallthrough]];
         }
-        case state::conneting: {
+        case state::connecting: {
             try {
                 if (!is_writable()) {
                     return false;
@@ -718,7 +719,7 @@ class tcp_client
     {
         unresolved = 0,
         unconnected,
-        conneting,
+        connecting,
         connected,
     } conn_state_{state::unresolved};
 

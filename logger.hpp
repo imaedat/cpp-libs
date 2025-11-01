@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
 #include <filesystem>
 #include <mutex>

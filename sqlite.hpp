@@ -2,8 +2,8 @@
 #define SQLITE_HPP_
 
 #include <sqlite3.h>
-#include <string.h>
 
+#include <cstring>
 #include <functional>
 #include <optional>
 #include <stdexcept>
@@ -15,14 +15,14 @@
 
 namespace tbd {
 
-namespace {
-void assert_success(int ec, const std::string& fname)
+namespace detail {
+inline void assert_success(int ec, const std::string& fname)
 {
     if (ec != SQLITE_OK) {
         throw std::runtime_error(fname + ": " + sqlite3_errstr(ec));
     }
 }
-}  // namespace
+}  // namespace detail
 
 class sqlite
 {
@@ -164,7 +164,7 @@ class sqlite
     {
         prepared_statement stmt;
         auto ec = sqlite3_prepare_v2(db_, sql.data(), -1, stmt.addr(), 0);
-        assert_success(ec, "sqlite3_prepare_v2");
+        detail::assert_success(ec, "sqlite3_prepare_v2");
         return cursor(std::move(stmt));
     }
 
@@ -194,27 +194,27 @@ class sqlite
         void operator()(const int64_t& num)
         {
             auto ec = sqlite3_bind_int64(stmt_, ++index_, num);
-            assert_success(ec, "sqlite3_bind_int64");
+            detail::assert_success(ec, "sqlite3_bind_int64");
         }
         void operator()(const double& num)
         {
             auto ec = sqlite3_bind_double(stmt_, ++index_, num);
-            assert_success(ec, "sqlite3_bind_double");
+            detail::assert_success(ec, "sqlite3_bind_double");
         }
         void operator()(const std::string& str)
         {
             auto ec = sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_STATIC);
-            assert_success(ec, "sqlite3_bind_text");
+            detail::assert_success(ec, "sqlite3_bind_text");
         }
         void operator()(std::string&& str)
         {
             auto ec = sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_TRANSIENT);
-            assert_success(ec, "sqlite3_bind_text");
+            detail::assert_success(ec, "sqlite3_bind_text");
         }
         void operator()(const std::pair<const void*, int>& blob)
         {
             auto ec = sqlite3_bind_blob(stmt_, ++index_, blob.first, blob.second, SQLITE_STATIC);
-            assert_success(ec, "sqlite3_bind_blob");
+            detail::assert_success(ec, "sqlite3_bind_blob");
         }
     };
 
@@ -223,7 +223,7 @@ class sqlite
     {
         prepared_statement stmt;
         auto ec = sqlite3_prepare_v2(db_, sql.data(), -1, stmt.addr(), 0);
-        assert_success(ec, "sqlite3_prepare_v2");
+        detail::assert_success(ec, "sqlite3_prepare_v2");
         param_visitor v(*stmt);
         (..., std::visit(v, param(std::forward<Args>(params))));
         return stmt;
@@ -367,7 +367,7 @@ class sqlite
         cursor& operator=(cursor&& rhs) noexcept = default;
         ~cursor() noexcept = default;
 
-        std::optional<const row> next() const
+        std::optional<const row> next()
         {
             auto ec = sqlite3_step(*stmt_);
 

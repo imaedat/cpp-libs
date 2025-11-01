@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -72,19 +73,21 @@ class coroutine_env_tmpl
             : fn_(std::move(rhs.fn_))
             , stack_size_(std::exchange(rhs.stack_size_, 0))
             , stack_(std::exchange(rhs.stack_, nullptr))
-            , finished_(std::exchange(rhs.finished_, false))
+            , finished_(std::exchange(rhs.finished_, true))
             , env_(std::exchange(rhs.env_, nullptr))
             , uctx_(std::exchange(rhs.uctx_, {}))
             , value_(std::move(rhs.value_))
         {
+            ::makecontext(&uctx_, (void (*)()) & entry, 1, (uintptr_t)this);
         }
         coroutine& operator=(coroutine&& rhs) noexcept
         {
             if (this != &rhs) {
+                release_stack();
                 fn_ = std::move(rhs.fn_);
                 stack_size_ = std::exchange(rhs.stack_size_, 0);
                 stack_ = std::exchange(rhs.stack_, nullptr);
-                finished_ = std::exchange(rhs.finished_, false);
+                finished_ = std::exchange(rhs.finished_, true);
                 env_ = std::exchange(rhs.env_, nullptr);
                 uctx_ = std::exchange(rhs.uctx_, {});
                 value_ = std::move(rhs.value_);
@@ -97,11 +100,7 @@ class coroutine_env_tmpl
 
         ~coroutine() noexcept
         {
-            if (stack_) {
-                ::mprotect(stack_, ::sysconf(_SC_PAGE_SIZE), PROT_WRITE);
-                ::free(stack_);
-                stack_ = nullptr;
-            }
+            release_stack();
         }
 
         explicit operator bool() const noexcept
@@ -121,7 +120,7 @@ class coroutine_env_tmpl
         coro_fn fn_;
         size_t stack_size_;
         char* stack_ = nullptr;
-        bool finished_ = false;
+        bool finished_ = true;
         coroutine_env_tmpl<T, U>* env_ = nullptr;
         ucontext_t uctx_;
         ret_type value_;
@@ -141,9 +140,8 @@ class coroutine_env_tmpl
             size_t pagesz = ::sysconf(_SC_PAGE_SIZE);
             // align stack_size_
             stack_size_ = (stack_size_ + pagesz - 1) & ~(pagesz - 1);
-            stack_ = (char*)::aligned_alloc(pagesz, pagesz + stack_size_);
-            if (!stack_) {
-                throw std::bad_alloc();
+            if (auto err = ::posix_memalign((void**)&stack_, pagesz, pagesz + stack_size_)) {
+                throw std::system_error(err, std::generic_category(), "posix_memalign");
             }
             ::mprotect(stack_, pagesz, PROT_NONE);  // guard page
 
@@ -164,6 +162,15 @@ class coroutine_env_tmpl
             }
 
             co->finished_ = true;
+        }
+
+        void release_stack() noexcept
+        {
+            if (stack_) {
+                ::mprotect(stack_, ::sysconf(_SC_PAGE_SIZE), PROT_WRITE);
+                ::free(stack_);
+                stack_ = nullptr;
+            }
         }
     };  // class coroutine
 
