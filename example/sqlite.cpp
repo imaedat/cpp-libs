@@ -62,7 +62,7 @@ struct record
     }
 };
 
-#define INSERT_INTO "insert into testtab (name, timestamp) values"
+#define INSERT_INTO "insert into testtab (name, word, timestamp) values"
 #define CURRENT_TIMESTAMP "strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime')"
 
 int main()
@@ -73,19 +73,20 @@ int main()
     db.exec("create table if not exists testtab ("
             "  id integer not null primary key autoincrement,"
             "  name text not null,"
+            "  word text,"
             "  timestamp text not null"
             ");");
     db.exec("create index if not exists idx_test1_id on testtab (id);");
     db.exec("create index if not exists idx_test1_name on testtab (name);");
 
     db.begin([](auto& txn) {
-        txn.exec(INSERT_INTO "('foo'," CURRENT_TIMESTAMP ")");
+        txn.exec(INSERT_INTO "('foo','blah'," CURRENT_TIMESTAMP ")");
         usleep(950);
-        txn.exec(INSERT_INTO "('bar'," CURRENT_TIMESTAMP ")");
+        txn.exec(INSERT_INTO "('bar','blah blah'," CURRENT_TIMESTAMP ")");
         usleep(950);
-        txn.exec(INSERT_INTO "('baz'," CURRENT_TIMESTAMP ")");
+        txn.exec(INSERT_INTO "('baz','blax'," CURRENT_TIMESTAMP ")");
         usleep(950);
-        txn.exec(INSERT_INTO "('qux'," CURRENT_TIMESTAMP ")");
+        txn.exec("insert into testtab (name, timestamp) values ('qux'," CURRENT_TIMESTAMP ")");
     });
 
     auto count = db.count("select count(*) from testtab;");
@@ -98,7 +99,7 @@ int main()
                  // callback per each row
                  (void)ncolumns;
                  (void)names;
-                 records.emplace_back(columns[0], columns[1], columns[2]);
+                 records.emplace_back(columns[0], columns[1], columns[3]);
              });
     for (const auto& r : records) {
         cout << r.to_string() << endl;
@@ -107,7 +108,7 @@ int main()
     puts("---");
 
     // cursor style
-    auto cur = db.cursor_for("select id, name, timestamp from testtab order by name;");
+    auto cur = db.cursor_for("select id, name, word, timestamp from testtab order by name;");
     while (true) {
         auto row_opt = cur.next();
         if (!row_opt) {
@@ -118,12 +119,15 @@ int main()
         cout << row[0].name() << "=" << row[0].to_i() << " ";
         cout << row[1].name() << "=" << row[1].to_s() << " ";
         cout << row[2].name() << "=" << row[2].to_s() << " ";
+        cout << row[3].name() << "=" << row[3].to_s() << " ";
         cout << endl;
     }
 
     puts("---");
 
-    auto cur2 = db.cursor_for("select id, name from testtab where id <= ? or name = ?;", 3L, "qux");
+    auto cur2 = db.cursor_for(
+        "select id, name, word, timestamp from testtab where id <= ? or name = ? or word like ?;",
+        1, "qux", "blah%");
     while (true) {
         auto row_opt = cur2.next();
         if (!row_opt) {
@@ -133,6 +137,8 @@ int main()
         cout << "#cols=" << row.column_count() << ": ";
         cout << row[0].name() << "=" << row[0].to_i() << " ";
         cout << row[1].name() << "=" << row[1].to_s() << " ";
+        cout << row[2].name() << "=" << row[2].to_s() << " ";
+        cout << row[3].name() << "=" << row[3].to_s() << " ";
         cout << endl;
     }
 

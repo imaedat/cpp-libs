@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -121,13 +122,16 @@ class sqlite
         }
     }
 
-    // binding paramter
-    using param = std::variant<int64_t, double, std::string, std::pair<const void*, int>>;
+    struct blob
+    {
+        const void* ptr;
+        int size;
+    };
 
     template <typename... Args>
     int64_t exec(std::string_view sql, Args&&... params) const
     {
-        auto stmt = bind_(sql, std::forward<Args>(params)...);
+        auto stmt = bind_params(sql, std::forward<Args>(params)...);
         auto ec = sqlite3_step(*stmt);
         if (ec != SQLITE_DONE && ec != SQLITE_ROW) {
             throw std::runtime_error(std::string("sqlite3_step: ") + sqlite3_errstr(ec));
@@ -138,7 +142,7 @@ class sqlite
     template <typename... Args>
     cursor cursor_for(std::string_view sql, Args&&... params) const
     {
-        auto stmt = bind_(sql, std::forward<Args>(params)...);
+        auto stmt = bind_params(sql, std::forward<Args>(params)...);
         return cursor(std::move(stmt));
     }
 
@@ -179,54 +183,53 @@ class sqlite
         }
     }
 
-    class param_visitor
-    {
-        sqlite3_stmt* stmt_ = nullptr;
-        size_t index_ = 0;
-
-      public:
-        explicit param_visitor(sqlite3_stmt* s)
-            : stmt_(s)
-            , index_(0)
-        {
-        }
-
-        void operator()(const int64_t& num)
-        {
-            auto ec = sqlite3_bind_int64(stmt_, ++index_, num);
-            detail::assert_success(ec, "sqlite3_bind_int64");
-        }
-        void operator()(const double& num)
-        {
-            auto ec = sqlite3_bind_double(stmt_, ++index_, num);
-            detail::assert_success(ec, "sqlite3_bind_double");
-        }
-        void operator()(const std::string& str)
-        {
-            auto ec = sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_STATIC);
-            detail::assert_success(ec, "sqlite3_bind_text");
-        }
-        void operator()(std::string&& str)
-        {
-            auto ec = sqlite3_bind_text(stmt_, ++index_, str.data(), str.size(), SQLITE_TRANSIENT);
-            detail::assert_success(ec, "sqlite3_bind_text");
-        }
-        void operator()(const std::pair<const void*, int>& blob)
-        {
-            auto ec = sqlite3_bind_blob(stmt_, ++index_, blob.first, blob.second, SQLITE_STATIC);
-            detail::assert_success(ec, "sqlite3_bind_blob");
-        }
-    };
-
     template <typename... Args>
-    prepared_statement bind_(std::string_view sql, Args&&... params) const
+    prepared_statement bind_params(std::string_view sql, Args&&... params) const
     {
         prepared_statement stmt;
         auto ec = sqlite3_prepare_v2(db_, sql.data(), -1, stmt.addr(), 0);
         detail::assert_success(ec, "sqlite3_prepare_v2");
-        param_visitor v(*stmt);
-        (..., std::visit(v, param(std::forward<Args>(params))));
+        int index = 0;
+        (..., bind(stmt, index, std::forward<Args>(params)));
         return stmt;
+    }
+
+    template <typename I, std::enable_if_t<std::is_integral_v<I>, bool> = true>
+    void bind(prepared_statement& stmt, int& index, I num) const
+    {
+        auto ec = sqlite3_bind_int64(*stmt, ++index, num);
+        detail::assert_success(ec, "sqlite3_bind_int64");
+    }
+
+    template <typename F, std::enable_if_t<std::is_floating_point_v<F>, bool> = true>
+    void bind(prepared_statement& stmt, int& index, F num) const
+    {
+        auto ec = sqlite3_bind_double(*stmt, ++index, num);
+        detail::assert_success(ec, "sqlite3_bind_double");
+    }
+
+    void bind(prepared_statement& stmt, int& index, const char* str) const
+    {
+        auto ec = sqlite3_bind_text(*stmt, ++index, str, -1, SQLITE_STATIC);
+        detail::assert_success(ec, "sqlite3_bind_text");
+    }
+
+    void bind(prepared_statement& stmt, int& index, const std::string& str) const
+    {
+        auto ec = sqlite3_bind_text(*stmt, ++index, str.data(), str.size(), SQLITE_STATIC);
+        detail::assert_success(ec, "sqlite3_bind_text");
+    }
+
+    void bind(prepared_statement& stmt, int& index, std::string&& str) const
+    {
+        auto ec = sqlite3_bind_text(*stmt, ++index, str.data(), str.size(), SQLITE_TRANSIENT);
+        detail::assert_success(ec, "sqlite3_bind_text");
+    }
+
+    void bind(prepared_statement& stmt, int& index, const blob& blob) const
+    {
+        auto ec = sqlite3_bind_blob(*stmt, ++index, blob.ptr, blob.size, SQLITE_STATIC);
+        detail::assert_success(ec, "sqlite3_bind_blob");
     }
 
     int64_t exec_(std::string_view sql, int (*cb)(void*, int, char**, char**), void* args) const
@@ -357,7 +360,7 @@ class sqlite
     /************************************************************************
      * cursor
      */
-    using column_types = std::variant<int64_t, double, char*, std::pair<const void*, int>>;
+    using column_types = std::variant<int64_t, double, const char*, blob>;
     class cursor
     {
       public:
@@ -387,24 +390,22 @@ class sqlite
                 names[i] = sqlite3_column_name(*stmt_, i);
 
                 switch (sqlite3_column_type(*stmt_, i)) {
-                case SQLITE_INTEGER: {
+                case SQLITE_INTEGER:
                     values[i] = (int64_t)sqlite3_column_int64(*stmt_, i);
                     break;
-                }
-                case SQLITE_FLOAT: {
+                case SQLITE_FLOAT:
                     values[i] = sqlite3_column_double(*stmt_, i);
                     break;
-                }
-                case SQLITE_TEXT: {
-                    values[i] = (char*)sqlite3_column_text(*stmt_, i);
+                case SQLITE_TEXT:
+                    values[i] = (const char*)sqlite3_column_text(*stmt_, i);
                     break;
-                }
-                case SQLITE_BLOB: {
-                    values[i] = std::make_pair(sqlite3_column_blob(*stmt_, i),
-                                               sqlite3_column_bytes(*stmt_, i));
+                case SQLITE_BLOB:
+                    values[i] =
+                        blob{sqlite3_column_blob(*stmt_, i), sqlite3_column_bytes(*stmt_, i)};
                     break;
-                }
                 case SQLITE_NULL:
+                    values[i] = "";
+                    break;
                 default:
                     break;
                 }
@@ -526,11 +527,11 @@ class sqlite
             case 2:  // const char *
                 value_ = std::get<2>(value);
                 break;
-            case 3: {  // pair
-                auto& pair = std::get<3>(value);
-                std::vector<uint8_t> blob(pair.second);
-                ::memcpy(blob.data(), pair.first, pair.second);
-                value_ = std::move(blob);
+            case 3: {  // blob
+                const auto& blob = std::get<3>(value);
+                std::vector<uint8_t> buf(blob.size);
+                ::memcpy(buf.data(), blob.ptr, blob.size);
+                value_ = std::move(buf);
                 break;
             }
             }
