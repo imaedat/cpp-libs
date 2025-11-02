@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -24,8 +25,6 @@ namespace tbd {
 class logger
 {
   public:
-    static constexpr size_t MAX_MSGS = 8192;
-
     enum class level : uint8_t
     {
         quiet = 0,
@@ -37,11 +36,127 @@ class logger
         trace,
     };
 
-    logger(std::string_view proc, std::string_view filepath, size_t max_msg = MAX_MSGS)
+    enum class policy : uint8_t
+    {
+        no_limit,
+        head_drop,
+        tail_drop,
+        caller_block,
+    };
+
+  private:
+    enum class req_type : uint8_t
+    {
+        log = 1,
+        flush,
+        rotate,
+        close,
+    };
+    struct request
+    {
+        req_type type;
+        struct timespec timestamp;
+        pid_t tid;
+        logger::level level;
+        std::string message;
+
+        request() noexcept = default;
+        request(req_type c) noexcept
+            : type(c)
+        {
+        }
+        request(const request&) = delete;
+        request(request&&) noexcept = default;
+    };
+
+    class policy_base
+    {
+      public:
+        virtual ~policy_base() noexcept = default;
+        virtual bool can_append(std::deque<request>&, std::unique_lock<std::mutex>&) = 0;
+        virtual void notify()
+        {
+        }
+
+      protected:
+        size_t max_msgs_;
+
+        explicit policy_base(size_t m)
+            : max_msgs_(m)
+        {
+        }
+    };
+
+    class no_limit_policy : public policy_base
+    {
+      public:
+        explicit no_limit_policy(size_t m)
+            : policy_base(m)
+        {
+        }
+        bool can_append(std::deque<request>&, std::unique_lock<std::mutex>&) override
+        {
+            return true;
+        }
+    };
+
+    class head_drop_policy : public policy_base
+    {
+      public:
+        explicit head_drop_policy(size_t m)
+            : policy_base(m)
+        {
+        }
+        bool can_append(std::deque<request>& msgq, std::unique_lock<std::mutex>&) override
+        {
+            if (msgq.size() >= max_msgs_) {
+                msgq.pop_front();
+            }
+            return true;
+        }
+    };
+
+    class tail_drop_policy : public policy_base
+    {
+      public:
+        explicit tail_drop_policy(size_t m)
+            : policy_base(m)
+        {
+        }
+        bool can_append(std::deque<request>& msgq, std::unique_lock<std::mutex>&) override
+        {
+            return msgq.size() < max_msgs_;
+        }
+    };
+
+    class caller_block_policy : public policy_base
+    {
+      public:
+        explicit caller_block_policy(size_t m)
+            : policy_base(m)
+        {
+        }
+        bool can_append(std::deque<request>& msgq, std::unique_lock<std::mutex>& lk) override
+        {
+            cv_.wait(lk, [&] { return msgq.size() < max_msgs_; });
+            return true;
+        }
+        void notify() override
+        {
+            cv_.notify_all();
+        }
+
+      private:
+        std::condition_variable cv_;
+    };
+
+  public:
+    logger(std::string_view proc, std::string_view filepath, policy policy = policy::no_limit,
+           size_t max_msgs = 8192)
         : pid_(getpid())
         , proc_(proc)
         , filepath_(filepath)
-        , max_msgs_(max_msg)
+        , policy_(make_policy(policy, max_msgs))
     {
         const auto& dir = filepath_.parent_path();
         if (!dir.empty()) {
@@ -136,40 +251,30 @@ class logger
     }
 
   private:
-    enum class req_type : uint8_t
-    {
-        log = 1,
-        flush,
-        rotate,
-        close,
-    };
-    struct request
-    {
-        req_type type;
-        struct timespec timestamp;
-        pid_t tid;
-        logger::level level;
-        std::string message;
-
-        request() noexcept = default;
-        request(req_type c) noexcept
-            : type(c)
-        {
-        }
-        request(const request&) = delete;
-        request(request&&) noexcept = default;
-    };
-
     pid_t pid_;
     std::string proc_;
-    std::filesystem::path filepath_;
     std::atomic<enum level> level_{level::info};
-    size_t max_msgs_;
+    std::filesystem::path filepath_;
     FILE* fp_ = nullptr;
-    std::thread writer_;
+    std::unique_ptr<policy_base> policy_;
     std::deque<request> msgq_;
     std::mutex mtx_;
     std::condition_variable cv_;
+    std::thread writer_;
+
+    std::unique_ptr<policy_base> make_policy(policy policy, size_t m)
+    {
+        switch (policy) {
+        case policy::head_drop:
+            return std::make_unique<head_drop_policy>(m);
+        case policy::tail_drop:
+            return std::make_unique<tail_drop_policy>(m);
+        case policy::caller_block:
+            return std::make_unique<caller_block_policy>(m);
+        default:
+            return std::make_unique<no_limit_policy>(m);
+        }
+    }
 
     template <typename T>
     auto pass(T&& value) const noexcept
@@ -189,7 +294,7 @@ class logger
         static constexpr int INITSZ = 512;
         char buf[INITSZ] = {0};
         auto result = ::snprintf(buf, INITSZ, args...);
-        if (result <= INITSZ) {
+        if (result < INITSZ) {
             return {buf, (size_t)result};
         }
 
@@ -199,8 +304,8 @@ class logger
         return s;
     }
 
-    template <typename S,
-              typename = std::enable_if_t<std::is_convertible_v<std::decay_t<S>, std::string_view>>>
+    template <typename S, typename E = std::enable_if_t<
+                              std::is_convertible_v<std::decay_t<S>, std::string_view>>>
     void log(level lv, S s)
     {
         log(lv, "%s", std::string_view(s).data());
@@ -216,10 +321,11 @@ class logger
             req.level = lv;
             req.message = format(pass(fmt), pass(args)...);
 
-            // TODO max msg
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
-            msgq_.emplace_back(std::move(req));
-            cv_.notify_one();
+            std::unique_lock<decltype(mtx_)> lk(mtx_);
+            if (policy_->can_append(msgq_, lk)) {
+                msgq_.emplace_back(std::move(req));
+                cv_.notify_one();
+            }
         }
     }
 
@@ -242,6 +348,7 @@ class logger
 
             auto req = std::move(msgq_.front());
             msgq_.pop_front();
+            policy_->notify();
             lk.unlock();
 
             switch (req.type) {
