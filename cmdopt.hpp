@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -32,8 +33,6 @@ inline constexpr bool always_false_v = false;
 
 class cmdopt
 {
-    using string_view = std::string_view;
-
     struct option
     {
         // definition
@@ -49,7 +48,7 @@ class cmdopt
         bool want_value = false;
         std::vector<std::string> values;
 
-        option(char s, string_view l, string_view d)
+        option(char s, std::string_view l, std::string_view d)
             : short_(s)
             , long_(l)
             , descr(d)
@@ -92,18 +91,18 @@ class cmdopt
 
             ss << "\t\t" << descr;
             if (has_value && !mandatory) {
-                ss << " (default=" << defval << ")";
+                ss << " [default=" << defval << "]";
             }
 
             return ss.str();
         }
 
-        static option make_flag(char s, string_view l, string_view d)
+        static option make_flag(char s, std::string_view l, std::string_view d)
         {
             return option(s, l, d);
         }
 
-        static option make_mandatory(char s, string_view l, string_view d)
+        static option make_mandatory(char s, std::string_view l, std::string_view d)
         {
             option o(s, l, d);
             o.has_value = true;
@@ -112,7 +111,7 @@ class cmdopt
         }
 
         template <typename T>
-        static option make_optional(char s, string_view l, T&& defval, string_view d)
+        static option make_optional(char s, std::string_view l, T&& defval, std::string_view d)
         {
             option o(s, l, d);
             o.has_value = true;
@@ -134,7 +133,7 @@ class cmdopt
     std::vector<char*> plain_args_;
 
   public:
-    explicit cmdopt(string_view path)
+    explicit cmdopt(std::string_view path)
         : progname_(std::filesystem::path(path).filename().c_str())
     {
     }
@@ -143,7 +142,7 @@ class cmdopt
     class cmdopt_error : public std::runtime_error
     {
       public:
-        cmdopt_error(string_view what)
+        cmdopt_error(std::string_view what)
             : std::runtime_error(what.data())
         {
         }
@@ -153,7 +152,7 @@ class cmdopt
      * define options
      */
     // bool flag option
-    void flag(char s, string_view l, string_view d)
+    void flag(char s, std::string_view l, std::string_view d)
     {
         assert_undefined(s, l);
         options_.emplace_back(option::make_flag(s, l, d));
@@ -161,7 +160,7 @@ class cmdopt
     }
 
     // mandatory valued option
-    void mandatory(char s, string_view l, string_view d)
+    void mandatory(char s, std::string_view l, std::string_view d)
     {
         assert_undefined(s, l);
         options_.emplace_back(option::make_mandatory(s, l, d));
@@ -170,7 +169,7 @@ class cmdopt
 
     // optional valued option
     template <typename T>
-    void optional(char s, string_view l, T&& defval, string_view d)
+    void optional(char s, std::string_view l, T&& defval, std::string_view d)
     {
         assert_undefined(s, l);
         options_.emplace_back(option::make_optional(s, l, std::forward<T>(defval), d));
@@ -194,6 +193,16 @@ class cmdopt
     /************************************************************************
      * parse
      */
+    std::optional<std::string> try_parse(int argc, char* argv[])
+    {
+        try {
+            parse(argc, argv);
+        } catch (const std::exception& e) {
+            return e.what();
+        }
+        return std::nullopt;
+    }
+
     void parse(int argc, char* argv[])
     {
         option* cur = nullptr;
@@ -263,7 +272,7 @@ class cmdopt
      * privates
      */
   private:
-    void assert_undefined(char s, string_view l) const
+    void assert_undefined(char s, std::string_view l) const
     {
         if (!s && l.empty()) {
             throw cmdopt_error("either short/long name must specified");
@@ -277,7 +286,7 @@ class cmdopt
         }
     }
 
-    void update_indices(char s, string_view l)
+    void update_indices(char s, std::string_view l)
     {
         if (s != '\0') {
             short_indices_.emplace(s, options_.size() - 1);
@@ -315,7 +324,7 @@ class cmdopt
     //    ^ start from
     option* parse_long(const char* c)
     {
-        string_view sv(c);
+        std::string_view sv(c);
         auto eq = sv.find('=');
         auto key = eq != sv.npos ? sv.substr(0, eq) : sv;
         auto val = eq != sv.npos ? sv.substr(eq + 1) : "";
