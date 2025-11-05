@@ -1,9 +1,14 @@
 #ifndef CMDOPT_HPP_
 #define CMDOPT_HPP_
 
+#include <charconv>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -35,7 +40,7 @@ class cmdopt
         std::string descr;
         std::string defval;
 
-        // appears
+        // appearance
         bool exists = false;
         bool want_value = false;
         std::string value;
@@ -47,20 +52,30 @@ class cmdopt
         {
         }
 
-        std::string surrogate() const
+        std::string repr() const
         {
-            return !detail::is_nul(&short_) ? std::string("-") + short_ : std::string("--") + long_;
+            return short_ ? std::string("-") + std::string(1, short_) : std::string("--") + long_;
         }
 
-        std::string to_string() const
+        std::string short_desc() const
         {
             std::ostringstream ss;
+            ss << (mandatory ? " " : " [") << repr() << (has_value ? " <VALUE>" : "")
+               << (mandatory ? "" : "]");
+            return ss.str();
+        }
+
+        std::string long_desc() const
+        {
+            std::ostringstream ss;
+
             ss << " ";
             if (short_) {
                 ss << "-" << short_;
             } else {
                 ss << "  ";
             }
+
             if (long_.empty()) {
                 ss << "\t";
             } else if (short_) {
@@ -68,11 +83,13 @@ class cmdopt
             } else {
                 ss << "  --" << long_;
             }
+
             if (has_value) {
-                ss << " <VALUE>";
+                ss << (long_.empty() ? " " : "=") << "<VALUE>";
             } else {
                 ss << "\t";
             }
+
             ss << "\t\t" << descr;
             if (has_value && !mandatory) {
                 ss << " (default=" << defval << ")";
@@ -109,6 +126,7 @@ class cmdopt
         }
     };
 
+    std::string progname_;
     std::vector<option> options_;
     std::unordered_map<char, size_t> short_indices_;
     std::unordered_map<std::string, size_t> long_indices_;
@@ -116,13 +134,16 @@ class cmdopt
     std::vector<char*> plain_args_;
 
   public:
-    cmdopt() noexcept = default;
+    explicit cmdopt(string_view path)
+        : progname_(std::filesystem::path(path).filename().c_str())
+    {
+    }
     ~cmdopt() noexcept = default;
 
-    class parse_error : public std::runtime_error
+    class cmdopt_error : public std::runtime_error
     {
       public:
-        parse_error(string_view what)
+        cmdopt_error(string_view what)
             : std::runtime_error(what.data())
         {
         }
@@ -131,33 +152,41 @@ class cmdopt
     /************************************************************************
      * define options
      */
-    // bool flag
-    void flag(char s, string_view l, string_view descr)
+    // bool flag option
+    void flag(char s, string_view l, string_view d)
     {
-        options_.emplace_back(option::make_flag(s, l, descr));
+        assert_undefined(s, l);
+        options_.emplace_back(option::make_flag(s, l, d));
         update_indices(s, l);
     }
 
-    // mandatory valued flag
-    void mandatory(char s, string_view l, string_view descr)
+    // mandatory valued option
+    void mandatory(char s, string_view l, string_view d)
     {
-        options_.emplace_back(option::make_mandatory(s, l, descr));
+        assert_undefined(s, l);
+        options_.emplace_back(option::make_mandatory(s, l, d));
         update_indices(s, l);
     }
 
-    // optional valued flag
+    // optional valued option
     template <typename T>
-    void optional(char s, string_view l, T&& defval, string_view descr)
+    void optional(char s, string_view l, T&& defval, string_view d)
     {
-        options_.emplace_back(option::make_optional(s, l, std::forward<T>(defval), descr));
+        assert_undefined(s, l);
+        options_.emplace_back(option::make_optional(s, l, std::forward<T>(defval), d));
         update_indices(s, l);
     }
 
     std::string usage() const
     {
         std::ostringstream ss;
+        ss << progname_;
         for (const auto& o : options_) {
-            ss << o.to_string() << "\n";
+            ss << o.short_desc();
+        }
+        ss << "\n";
+        for (const auto& o : options_) {
+            ss << o.long_desc() << "\n";
         }
         return ss.str();
     }
@@ -180,19 +209,25 @@ class cmdopt
 
             cur = nullptr;
             if (rest_are_plains) {
+                // after "--"
                 plain_args_.push_back(c);
+
             } else if (!detail::is_hyphen(c)) {
                 // "x..."
                 plain_args_.push_back(c);
+
             } else if (detail::is_nul(c + 1)) {
-                // "-"
+                // "-" only
                 plain_args_.push_back(c);
+
             } else if (!detail::is_hyphen(++c)) {
                 // "-x..."
                 cur = parse_short(c);
+
             } else if (detail::is_nul(++c)) {
                 // "--", stop parsing
                 rest_are_plains = true;
+
             } else {
                 // "--x..."
                 cur = parse_long(c);
@@ -200,7 +235,7 @@ class cmdopt
         }
 
         if (cur && cur->want_value) {
-            throw parse_error(std::string("option ") + cur->surrogate() + " must specify value");
+            throw cmdopt_error(std::string("option ") + cur->repr() + " must specify value");
         }
 
         ensure_all_mandatories();
@@ -209,29 +244,29 @@ class cmdopt
     /************************************************************************
      * getter
      */
-    bool exists(char s)
+    bool exists(char s) const
     {
         return find_short(s).exists;
     }
 
-    bool exists(string_view l)
+    bool exists(string_view l) const
     {
         return find_long(l).exists;
     }
 
     template <typename T>
-    T get(char s)
+    T get(char s) const
     {
         return get_<T>(find_short(s));
     }
 
     template <typename T>
-    T get(string_view l)
+    T get(string_view l) const
     {
         return get_<T>(find_long(l));
     }
 
-    const std::vector<char*>& left_args() const
+    const std::vector<char*>& rest_args() const
     {
         return plain_args_;
     }
@@ -240,6 +275,16 @@ class cmdopt
      * privates
      */
   private:
+    void assert_undefined(char s, string_view l)
+    {
+        if (s != '\0' && short_indices_.find(s) != short_indices_.cend()) {
+            throw cmdopt_error(std::string("redefinition of option `") + std::string(1, s) + "'");
+        }
+        if (!l.empty() && long_indices_.find(l.data()) != long_indices_.cend()) {
+            throw cmdopt_error(std::string("redefinition of option `") + l.data() + "'");
+        }
+    }
+
     void update_indices(char s, string_view l)
     {
         if (s != '\0') {
@@ -251,7 +296,7 @@ class cmdopt
     }
 
     // "-x"
-    //   ^ start with
+    //   ^ start from
     option* parse_short(char* c)
     {
         bool cont = false;
@@ -275,7 +320,7 @@ class cmdopt
     }
 
     // "--x"
-    //    ^ start with
+    //    ^ start from
     option* parse_long(char* c)
     {
         std::string dup(c);
@@ -304,51 +349,57 @@ class cmdopt
     {
         for (const auto& o : options_) {
             if (o.mandatory && !o.exists) {
-                throw parse_error(std::string("no mandatory option: ") + o.surrogate());
+                throw cmdopt_error(std::string("no mandatory option: ") + o.repr());
             }
         }
     }
 
-    option& find_short(char s)
+    option& find_short(char s) const
     {
         auto it = short_indices_.find(s);
         if (it == short_indices_.cend()) {
-            throw parse_error(std::string("unknown short option `") + std::string(1, s) + "'");
+            throw cmdopt_error(std::string("unknown short option `") + std::string(1, s) + "'");
         }
-        return options_.at(it->second);
+        return const_cast<option&>(options_.at(it->second));
     }
 
-    option& find_long(string_view l)
+    option& find_long(string_view l) const
     {
         auto it = long_indices_.find(l.data());
         if (it == long_indices_.cend()) {
-            throw parse_error(std::string("unknown long option `") + l.data() + "'");
+            throw cmdopt_error(std::string("unknown long option `") + l.data() + "'");
         }
-        return options_.at(it->second);
+        return const_cast<option&>(options_.at(it->second));
     }
 
     template <typename T>
-    T get_(const option& o)
+    T get_(const option& o) const
     {
         if (!o.has_value) {
-            throw parse_error(std::string("option ") + o.surrogate() +
-                              " is flag option, has no value");
+            throw cmdopt_error(std::string("option ") + o.repr() + " is flag option, has no value");
         }
         const auto& value = (o.mandatory || o.exists) ? o.value : o.defval;
 
         if constexpr (std::is_integral_v<T>) {
-            try {
-                return std::stoll(value);
-            } catch (...) {
-                throw parse_error("option " + o.surrogate() + " has no integer value: " + value);
+            T out{};
+            auto result = std::from_chars(value.data(), value.data() + value.size(), out);
+            if (result.ec != std::errc() || result.ptr != value.data() + value.size()) {
+                throw cmdopt_error("option " + o.repr() + " has no integer value: " + value);
             }
+            return out;
+
         } else if constexpr (std::is_floating_point_v<T>) {
-            try {
-                return std::stod(value);
-            } catch (...) {
-                throw parse_error("option " + o.surrogate() + " has no floating value: " + value);
+            errno = 0;
+            char* endptr = nullptr;
+            auto out = ::strtold(value.c_str(), &endptr);
+            if (endptr == value.c_str() || errno == ERANGE || !detail::is_nul(endptr)) {
+                throw cmdopt_error("option " + o.repr() + " has no floating value: " + value);
             }
+            return (T)out;
+
         } else {
+            static_assert(std::is_same_v<T, std::string>,
+                          "only string support for non-numeric option values");
             return value;
         }
     }
