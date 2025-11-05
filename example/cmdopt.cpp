@@ -12,6 +12,7 @@ int main(int argc, char* argv[])
     opt.optional('p', "port", 55555, "broker port");
     opt.mandatory('t', "", "topic to publish");
     opt.optional('\0', "message", "", "message to publish");
+    opt.optional('I', "include", "", "include path");
     opt.flag('h', "help", "show this message");
     opt.flag('v', "version", "show version");
 
@@ -26,6 +27,12 @@ int main(int argc, char* argv[])
     cout << "message\t" << opt.get<std::string>("message") << "\n";
     cout << "help\t" << boolalpha << opt.exists('h') << "\n";
     cout << "version\t" << boolalpha << opt.exists('v') << "\n";
+
+    cout << "include\t";
+    for (const auto& p : opt.get_multi<std::string>('I')) {
+        cout << p << " ";
+    }
+    cout << "\n";
 
     puts("---");
     cout << "plain args:";
