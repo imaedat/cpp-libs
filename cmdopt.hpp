@@ -73,23 +73,19 @@ class cmdopt
         {
             std::ostringstream ss;
 
-            ss << " ";
+            ss << "  ";
             if (short_) {
                 ss << "-" << short_;
             } else {
                 ss << "  ";
             }
 
-            if (long_.empty()) {
-                ss << "\t";
-            } else if (short_) {
-                ss << ", --" << long_;
-            } else {
-                ss << "  --" << long_;
+            if (!long_.empty()) {
+                ss << (short_ ? "," : " ") << " --" << long_;
             }
 
             if (has_value) {
-                ss << (long_.empty() ? " " : "=") << "<VALUE>";
+                ss << (long_.empty() ? " " : "=") << "<VALUE>" << (long_.empty() ? "\t" : "");
             } else {
                 ss << "\t";
             }
@@ -184,11 +180,11 @@ class cmdopt
     std::string usage() const
     {
         std::ostringstream ss;
-        ss << progname_;
+        ss << "usage: " << progname_;
         for (const auto& o : options_) {
             ss << o.short_desc();
         }
-        ss << "\n";
+        ss << "\n\noptions:\n";
         for (const auto& o : options_) {
             ss << o.long_desc() << "\n";
         }
@@ -212,16 +208,8 @@ class cmdopt
             }
 
             cur = nullptr;
-            if (rest_are_plains) {
-                // after "--"
-                plain_args_.push_back(c);
-
-            } else if (!detail::is_hyphen(c)) {
-                // "x..."
-                plain_args_.push_back(c);
-
-            } else if (detail::is_nul(c + 1)) {
-                // "-" only
+            if (!detail::is_hyphen(c) || detail::is_nul(c + 1) || rest_are_plains) {
+                // "x..."             or "-" only              or after "--"
                 plain_args_.push_back(c);
 
             } else if (!detail::is_hyphen(++c)) {
@@ -275,9 +263,13 @@ class cmdopt
      * privates
      */
   private:
-    void assert_undefined(char s, string_view l)
+    void assert_undefined(char s, string_view l) const
     {
-        if (s != '\0' && short_indices_.find(s) != short_indices_.cend()) {
+        if (!s && l.empty()) {
+            throw cmdopt_error("either short/long name must specified");
+        }
+
+        if (s && short_indices_.find(s) != short_indices_.cend()) {
             throw cmdopt_error("redefinition of option `" + std::string(1, s) + "'");
         }
         if (!l.empty() && long_indices_.find(l.data()) != long_indices_.cend()) {
@@ -297,7 +289,7 @@ class cmdopt
 
     // "-x"
     //   ^ start from
-    option* parse_short(char* c)
+    option* parse_short(const char* c)
     {
         bool cont = false;
         do {
@@ -321,25 +313,24 @@ class cmdopt
 
     // "--x"
     //    ^ start from
-    option* parse_long(char* c)
+    option* parse_long(const char* c)
     {
-        std::string dup(c);
-        c = (char*)dup.data();
-        auto* val = ::strchr(c, '=');
-        if (val) {
-            *val = '\0';
-            ++val;
-        }
+        string_view sv(c);
+        auto eq = sv.find('=');
+        auto key = eq != sv.npos ? sv.substr(0, eq) : sv;
+        auto val = eq != sv.npos ? sv.substr(eq + 1) : "";
 
-        auto& o = find_option(c);
+        auto& o = find_option(key);
         o.exists = true;
-        if (o.has_value) {
-            if (val) {
-                o.values.emplace_back(val);
-            } else {
-                o.want_value = true;
-                return &o;
+        if (!o.has_value) {
+            if (!val.empty()) {
+                throw cmdopt_error("option " + o.repr() + " does not take value");
             }
+        } else if (!val.empty()) {
+            o.values.emplace_back(val);
+        } else {
+            o.want_value = true;
+            return &o;
         }
 
         return nullptr;
@@ -355,26 +346,32 @@ class cmdopt
     }
 
     template <typename S>
-    option& find_option(S name) const
+    const option& find_option(S name) const
     {
         if constexpr (std::is_same_v<std::decay_t<S>, char>) {
             auto it = short_indices_.find(name);
             if (it == short_indices_.cend()) {
                 throw cmdopt_error("unknown short option `" + std::string(1, name) + "'");
             }
-            return const_cast<option&>(options_.at(it->second));
+            return options_.at(it->second);
 
         } else if constexpr (std::is_convertible_v<std::decay_t<S>, std::string_view>) {
-            string_view sv(name);
-            auto it = long_indices_.find(sv.data());
+            std::string s(name);
+            auto it = long_indices_.find(s);
             if (it == long_indices_.cend()) {
-                throw cmdopt_error(std::string("unknown long option `") + sv.data() + "'");
+                throw cmdopt_error("unknown long option `" + s + "'");
             }
-            return const_cast<option&>(options_.at(it->second));
+            return options_.at(it->second);
 
         } else {
             static_assert(detail::always_false_v<S>, "invalid type for option name");
         }
+    }
+
+    template <typename S>
+    option& find_option(S name)
+    {
+        return const_cast<option&>(static_cast<const cmdopt*>(this)->find_option(name));
     }
 
     template <typename T>

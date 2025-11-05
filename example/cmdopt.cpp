@@ -22,11 +22,11 @@ int main(int argc, char* argv[])
     opt.parse(argc, argv);
 
     cout << "addr\t" << opt.get<std::string>('a') << "\n";
-    cout << "port\t" << opt.get<uint16_t>('p') << "\n";
+    cout << "port\t" << opt.get<uint16_t>("port") << "\n";
     cout << "topic\t" << opt.get<std::string>('t') << "\n";
     cout << "message\t" << opt.get<std::string>("message") << "\n";
     cout << "help\t" << boolalpha << opt.exists('h') << "\n";
-    cout << "version\t" << boolalpha << opt.exists('v') << "\n";
+    cout << "version\t" << boolalpha << opt.exists("version") << "\n";
 
     cout << "include\t";
     for (const auto& p : opt.get_multi<std::string>('I')) {
