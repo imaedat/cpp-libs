@@ -152,28 +152,31 @@ class cmdopt
      * define options
      */
     // bool flag option
-    void flag(char s, std::string_view l, std::string_view d)
+    cmdopt& flag(char s, std::string_view l, std::string_view d)
     {
         assert_undefined(s, l);
         options_.emplace_back(option::make_flag(s, l, d));
         update_indices(s, l);
+        return *this;
     }
 
     // mandatory valued option
-    void mandatory(char s, std::string_view l, std::string_view d)
+    cmdopt& mandatory(char s, std::string_view l, std::string_view d)
     {
         assert_undefined(s, l);
         options_.emplace_back(option::make_mandatory(s, l, d));
         update_indices(s, l);
+        return *this;
     }
 
     // optional valued option
     template <typename T>
-    void optional(char s, std::string_view l, T&& defval, std::string_view d)
+    cmdopt& optional(char s, std::string_view l, T&& defval, std::string_view d)
     {
         assert_undefined(s, l);
         options_.emplace_back(option::make_optional(s, l, std::forward<T>(defval), d));
         update_indices(s, l);
+        return *this;
     }
 
     std::string usage() const
