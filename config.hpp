@@ -2,61 +2,19 @@
 #define CONFIG_HPP_
 
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
 #include <fstream>
 #include <string>
 #include <unordered_map>
-#include <variant>
 
 namespace tbd {
 
 class config
 {
-    struct string_like_hash
-    {
-        using is_transparent = void;
-        size_t operator()(const std::string& s) const noexcept
-        {
-            return std::hash<std::string>{}(s);
-        }
-        size_t operator()(std::string_view sv) const noexcept
-        {
-            return std::hash<std::string_view>{}(sv);
-        }
-        size_t operator()(const char* s) const noexcept
-        {
-            return std::hash<std::string_view>{}(s);
-        }
-    };
-
-    struct string_like_equal
-    {
-        using is_transparent = void;
-        bool operator()(const std::string& s1, const std::string& s2) const noexcept
-        {
-            return s1 == s2;
-        }
-        bool operator()(const std::string& s1, std::string_view s2) const noexcept
-        {
-            return s1 == s2;
-        }
-        bool operator()(std::string_view s1, const std::string& s2) const noexcept
-        {
-            return s1 == s2;
-        }
-        bool operator()(const std::string& s1, const char* s2) const noexcept
-        {
-            return s1 == s2;
-        }
-        bool operator()(const char* s1, const std::string& s2) const noexcept
-        {
-            return s1 == s2;
-        }
-    };
-
   public:
     config() noexcept = default;
-    explicit config(const std::string& file)
+    explicit config(std::string_view file)
     {
         parse(file);
     }
@@ -65,21 +23,52 @@ class config
     T get(std::string_view key, T defval = {}) const
     {
         auto it = config_.find(key.data());
-        if (it != config_.end()) {
-            if (auto val = std::get_if<T>(&it->second)) {
-                return *val;
+        if (it == config_.end()) {
+            return defval;
+        }
+
+        const auto& sval = it->second;
+
+        if constexpr (std::is_same_v<T, std::string>) {
+            return sval;
+
+        } else if constexpr (std::is_same_v<T, bool>) {
+            std::string bval(sval);
+            std::transform(bval.begin(), bval.end(), bval.begin(), ::tolower);
+            if (bval == "true") {
+                return true;
+            }
+            if (bval == "false") {
+                return false;
+            }
+
+        } else if constexpr (std::is_integral_v<T>) {
+            errno = 0;
+            char* endptr = nullptr;
+            auto result = ::strtoll(sval.c_str(), &endptr, 0);
+            if (errno == 0 && endptr && endptr != sval.c_str() && *endptr == '\0') {
+                return (T)result;
+            }
+
+        } else if constexpr (std::is_floating_point_v<T>) {
+            errno = 0;
+            char* endptr = nullptr;
+            auto result = ::strtod(sval.c_str(), &endptr);
+            if (errno == 0 && endptr && endptr != sval.c_str() && *endptr == '\0') {
+                return (T)result;
             }
         }
+
         return defval;
+        // throw std::bad_cast();
     }
 
   private:
-    using value_type = std::variant<std::string, int, bool>;
-    std::unordered_map<std::string, value_type, string_like_hash, string_like_equal> config_;
+    std::unordered_map<std::string, std::string> config_;
 
-    void parse(const std::string& file)
+    void parse(std::string_view file)
     {
-        std::ifstream ifs(file);
+        std::ifstream ifs(file.data());
         if (!ifs) {
             throw std::system_error(errno, std::generic_category());
         }
@@ -97,8 +86,13 @@ class config
                 continue;
             }
 
-            config_.emplace(trim(trimmed.substr(0, eq_pos)),
-                            parse_value(trim(trimmed.substr(eq_pos + 1))));
+            const auto& val = trim(trimmed.substr(eq_pos + 1));
+            if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
+                // quoted
+                config_.emplace(trim(trimmed.substr(0, eq_pos)), val.substr(1, val.size() - 2));
+            } else {
+                config_.emplace(trim(trimmed.substr(0, eq_pos)), val);
+            }
         }
     }
 
@@ -111,36 +105,6 @@ class config
         }
         auto end = s.find_last_not_of(" \t\r\n");
         return std::string_view(&s[begin], end - begin + 1);
-    }
-
-    value_type parse_value(const std::string_view& sval) const
-    {
-        // quoted
-        if (sval.size() >= 2 && sval.front() == '"' && sval.back() == '"') {
-            return std::string(&sval[1], sval.size() - 2);
-        }
-
-        // bool
-        if (sval.size() == 4 || sval.size() == 5) {
-            std::string bval(sval);
-            std::transform(bval.begin(), bval.end(), bval.begin(), ::tolower);
-            if (bval == "true") {
-                return true;
-            }
-            if (bval == "false") {
-                return false;
-            }
-        }
-
-        // int
-        char* endptr = nullptr;
-        auto ival = ::strtol(sval.data(), &endptr, 0);
-        if (*endptr == '\0') {
-            return static_cast<int>(ival);
-        }
-
-        // string
-        return std::string(sval);
     }
 };
 
