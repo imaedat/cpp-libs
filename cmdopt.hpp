@@ -2,7 +2,6 @@
 #define CMDOPT_HPP_
 
 #include <algorithm>
-#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -133,6 +132,7 @@ class cmdopt
     std::vector<char*> plain_args_;
 
   public:
+    cmdopt() noexcept = default;
     explicit cmdopt(std::string_view path)
         : progname_(std::filesystem::path(path).filename().c_str())
     {
@@ -208,6 +208,10 @@ class cmdopt
 
     void parse(int argc, char* argv[])
     {
+        if (argc >= 1) {
+            progname_.assign(std::filesystem::path(argv[0]).filename().c_str());
+        }
+
         option* cur = nullptr;
         bool rest_are_plains = false;
         for (auto i = 1; i < argc; ++i) {
@@ -413,22 +417,22 @@ class cmdopt
     template <typename T>
     T convert(const option& o, const std::string& value) const
     {
+        char* endptr = nullptr;
+        errno = 0;
+
         if constexpr (std::is_integral_v<T>) {
-            T out{};
-            auto result = std::from_chars(value.data(), value.data() + value.size(), out);
-            if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
-                throw cmdopt_error("option " + o.repr() + " has no integer value: " + value);
+            auto result = ::strtoll(value.c_str(), &endptr, 0);
+            if (errno == 0 && endptr && endptr != value.c_str() && *endptr == '\0') {
+                return (T)result;
             }
-            return out;
+            throw cmdopt_error("option " + o.repr() + " has no integer value: " + value);
 
         } else if constexpr (std::is_floating_point_v<T>) {
-            errno = 0;
-            char* endptr = nullptr;
-            auto out = ::strtold(value.c_str(), &endptr);
-            if (endptr == value.c_str() || errno == ERANGE || !detail::is_nul(endptr)) {
-                throw cmdopt_error("option " + o.repr() + " has no floating value: " + value);
+            auto result = ::strtod(value.c_str(), &endptr);
+            if (errno == 0 && endptr && endptr != value.c_str() && *endptr == '\0') {
+                return (T)result;
             }
-            return (T)out;
+            throw cmdopt_error("option " + o.repr() + " has no floating value: " + value);
 
         } else {
             static_assert(std::is_same_v<T, std::string>,
