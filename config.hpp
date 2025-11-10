@@ -2,7 +2,6 @@
 #define CONFIG_HPP_
 
 #include <algorithm>
-#include <charconv>
 #include <cstdlib>
 #include <fstream>
 #include <string>
@@ -28,6 +27,8 @@ class config
         }
 
         const auto& sval = it->second;
+        char* endptr = nullptr;
+        errno = 0;
 
         if constexpr (std::is_same_v<T, std::string>) {
             return sval;
@@ -43,19 +44,15 @@ class config
             }
 
         } else if constexpr (std::is_integral_v<T>) {
-            errno = 0;
-            char* endptr = nullptr;
-            auto result = ::strtoll(sval.c_str(), &endptr, 0);
+            auto ival = ::strtoll(sval.c_str(), &endptr, 0);
             if (errno == 0 && endptr && endptr != sval.c_str() && *endptr == '\0') {
-                return (T)result;
+                return (T)ival;
             }
 
         } else if constexpr (std::is_floating_point_v<T>) {
-            errno = 0;
-            char* endptr = nullptr;
-            auto result = ::strtod(sval.c_str(), &endptr);
+            auto fval = ::strtod(sval.c_str(), &endptr);
             if (errno == 0 && endptr && endptr != sval.c_str() && *endptr == '\0') {
-                return (T)result;
+                return (T)fval;
             }
         }
 
@@ -86,7 +83,7 @@ class config
                 continue;
             }
 
-            const auto& val = trim(trimmed.substr(eq_pos + 1));
+            const auto& val = trim(remove_trailing_comment(trimmed.substr(eq_pos + 1)));
             if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
                 // quoted
                 config_.emplace(trim(trimmed.substr(0, eq_pos)), val.substr(1, val.size() - 2));
@@ -105,6 +102,19 @@ class config
         }
         auto end = s.find_last_not_of(" \t\r\n");
         return std::string_view(&s[begin], end - begin + 1);
+    }
+
+    std::string_view remove_trailing_comment(std::string_view s) const noexcept
+    {
+        bool in_quote = false;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] == '"' && (i == 0 || s[i - 1] != '\\')) {
+                in_quote = !in_quote;
+            } else if (s[i] == '#' && !in_quote) {
+                return s.substr(0, i);
+            }
+        }
+        return s;
     }
 };
 
