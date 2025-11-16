@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <system_error>
 
@@ -25,7 +26,7 @@ struct co_null_type
 }  // namespace detail
 
 template <typename T = detail::co_null_type, typename U = detail::co_null_type>
-class coroutine_env_tmpl
+class coroutine_env
 {
     using gen_type = std::optional<T>;
     using ret_type = std::optional<U>;
@@ -36,22 +37,38 @@ class coroutine_env_tmpl
     class yielder
     {
       public:
-        ret_type operator()(gen_type&& v = {}) const
+        ret_type operator()(gen_type&& g = {}) const
         {
-            if (!env_ || ::memcmp(env_, MAGIC, sizeof(MAGIC)) != 0) {
-                throw std::invalid_argument("yielder::operator(): not initialized");
-            }
-            return env_->yield(co_, std::forward<gen_type>(v));
+            assert_env();
+            return env_->yield(co_, std::forward<gen_type>(g));
+        }
+
+        void exit(gen_type&& g = {}) const
+        {
+            assert_env();
+            env_->exit(co_, std::forward<gen_type>(g));
+        }
+
+        ret_type initial_value() const
+        {
+            return std::move(const_cast<yielder*>(this)->co_->value_);
         }
 
       private:
-        coroutine_env_tmpl<T, U>* env_ = nullptr;
+        coroutine_env<T, U>* env_ = nullptr;
         coroutine* co_ = nullptr;
 
-        explicit yielder(coroutine_env_tmpl<T, U>* env, coroutine* co) noexcept
+        yielder(coroutine_env<T, U>* env, coroutine* co) noexcept
             : env_(env)
             , co_(co)
         {
+        }
+
+        void assert_env() const
+        {
+            if (!env_ || ::memcmp(env_, MAGIC, sizeof(MAGIC)) != 0) {
+                throw std::invalid_argument("env expired");
+            }
         }
 
         friend class coroutine;
@@ -63,7 +80,7 @@ class coroutine_env_tmpl
   public:
     class coroutine
     {
-        friend class coroutine_env_tmpl<T, U>;
+        friend class coroutine_env<T, U>;
 
       public:
         coroutine() = default;
@@ -121,12 +138,12 @@ class coroutine_env_tmpl
         size_t stack_size_;
         char* stack_ = nullptr;
         bool finished_ = true;
-        coroutine_env_tmpl<T, U>* env_ = nullptr;
+        coroutine_env<T, U>* env_ = nullptr;
         ucontext_t uctx_;
         ret_type value_;
         std::exception_ptr exception_;
 
-        coroutine(coro_fn&& fn, size_t ss, coroutine_env_tmpl<T, U>* env)
+        coroutine(coro_fn&& fn, size_t ss, coroutine_env<T, U>* env)
             : fn_(std::forward<coro_fn>(fn))
             , stack_size_(ss)
             , stack_(nullptr)
@@ -138,8 +155,7 @@ class coroutine_env_tmpl
             }
 
             size_t pagesz = ::sysconf(_SC_PAGE_SIZE);
-            // align stack_size_
-            stack_size_ = (stack_size_ + pagesz - 1) & ~(pagesz - 1);
+            stack_size_ = (stack_size_ + pagesz - 1) & ~(pagesz - 1);  // align
             if (auto err = ::posix_memalign((void**)&stack_, pagesz, pagesz + stack_size_)) {
                 throw std::system_error(err, std::generic_category(), "posix_memalign");
             }
@@ -147,7 +163,7 @@ class coroutine_env_tmpl
 
             uctx_.uc_stack.ss_sp = stack_ + pagesz;
             uctx_.uc_stack.ss_size = stack_size_;
-            uctx_.uc_link = &env_->uctx_;
+            uctx_.uc_link = env_->uctx_.get();
 
             ::makecontext(&uctx_, (void (*)()) & entry, 1, (uintptr_t)this);
         }
@@ -177,36 +193,45 @@ class coroutine_env_tmpl
     friend class yielder;
     friend class coroutine;
 
+    /************************************************************************
+     * coroutine_env
+     */
+  private:
+    char magic_[4];
+    std::unique_ptr<ucontext_t> uctx_ = nullptr;  // move safety
+    coroutine* current_ = nullptr;
+    gen_type last_value_;
+
   public:
-    coroutine_env_tmpl() noexcept
-        : current_(nullptr)
+    coroutine_env() noexcept
+        : uctx_(std::make_unique<ucontext_t>())
     {
         ::memcpy(magic_, MAGIC, sizeof(magic_));
     }
 
-    coroutine_env_tmpl(const coroutine_env_tmpl&) = delete;
-    coroutine_env_tmpl& operator=(const coroutine_env_tmpl&) = delete;
-    coroutine_env_tmpl(coroutine_env_tmpl&& rhs) noexcept
-        : uctx_(std::exchange(rhs.uctx_, {}))
+    coroutine_env(const coroutine_env&) = delete;
+    coroutine_env& operator=(const coroutine_env&) = delete;
+    coroutine_env(coroutine_env&& rhs) noexcept
+        : uctx_(std::move(rhs.uctx_))
         , current_(std::exchange(rhs.current_, nullptr))
         , last_value_(std::move(rhs.last_value_))
     {
         ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
         ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
     }
-    coroutine_env_tmpl& operator=(coroutine_env_tmpl&& rhs) noexcept
+    coroutine_env& operator=(coroutine_env&& rhs) noexcept
     {
         if (this != &rhs) {
             ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
             ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
-            uctx_ = std::exchange(rhs.uctx_, {});
+            uctx_ = std::move(rhs.uctx_);
             current_ = std::exchange(rhs.current_, nullptr);
             last_value_ = std::move(rhs.last_value_);
         }
         return *this;
     }
 
-    ~coroutine_env_tmpl() noexcept
+    ~coroutine_env() noexcept
     {
         ::memset(magic_, 0, sizeof(magic_));
     }
@@ -216,21 +241,7 @@ class coroutine_env_tmpl
         return coroutine(std::forward<coro_fn>(fn), ss, this);
     }
 
-#if 0
-    void exit(gen_type&& v = {})
-    {
-        assert(current_);
-        current_->finished_ = true;
-        yield(std::forward<gen_type>(v));
-    }
-#endif
-
   private:
-    char magic_[4];
-    ucontext_t uctx_;
-    coroutine* current_;
-    gen_type last_value_;
-
     gen_type resume(coroutine* co, ret_type&& r = {})
     {
         assert(!current_);
@@ -241,7 +252,7 @@ class coroutine_env_tmpl
 
         co->value_ = std::move(r);
         current_ = co;
-        if (::swapcontext(&uctx_, &current_->uctx_) < 0) {
+        if (::swapcontext(uctx_.get(), &current_->uctx_) < 0) {
             throw std::system_error(errno, std::generic_category(),
                                     "coroutine_env::resume: swapcontext");
         }
@@ -264,24 +275,30 @@ class coroutine_env_tmpl
         }
     }
 
-    ret_type yield(coroutine* co, gen_type&& v = {})
+    ret_type yield(coroutine* co, gen_type&& g = {})
     {
         assert(current_);
-        assert(&current_->env_->uctx_ == &uctx_);
+        assert(current_->env_->uctx_.get() == uctx_.get());
 
-        last_value_ = std::forward<gen_type>(v);
-        if (::swapcontext(&current_->uctx_, &uctx_) < 0) {
+        last_value_ = std::forward<gen_type>(g);
+        if (::swapcontext(&current_->uctx_, uctx_.get()) < 0) {
             throw std::system_error(errno, std::generic_category(),
                                     "coroutine_env::yield: swapcontext");
         }
 
-        return co->value_;
+        return std::move(co->value_);
+    }
+
+    void exit(coroutine* co, gen_type&& g = {})
+    {
+        assert(current_);
+        current_->finished_ = true;
+        (void)yield(co, std::forward<gen_type>(g));
     }
 };
 
-using co_env = coroutine_env_tmpl<detail::co_null_type, detail::co_null_type>;
-using co_yielder = coroutine_env_tmpl<detail::co_null_type, detail::co_null_type>::yielder;
-using coroutine = coroutine_env_tmpl<detail::co_null_type, detail::co_null_type>::coroutine;
+using coro_env = coroutine_env<detail::co_null_type, detail::co_null_type>;
+using coroutine = coro_env::coroutine;
 
 }  // namespace tbd
 
