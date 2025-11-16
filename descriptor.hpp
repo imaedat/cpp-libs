@@ -41,7 +41,7 @@ class fd_wrapper
 {
   public:
     fd_wrapper() noexcept = default;
-    fd_wrapper(int fd)
+    explicit fd_wrapper(int fd)
         : fd_(fd)
     {
         if (fd_ < 0) {

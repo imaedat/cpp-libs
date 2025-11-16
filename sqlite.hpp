@@ -416,7 +416,7 @@ class sqlite
       private:
         prepared_statement stmt_;
 
-        cursor(prepared_statement&& stmt)
+        explicit cursor(prepared_statement&& stmt)
             : stmt_(std::move(stmt))
         {
         }

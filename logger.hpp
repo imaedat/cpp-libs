@@ -61,7 +61,7 @@ class logger
         std::string message;
 
         request() noexcept = default;
-        request(req_type c) noexcept
+        explicit request(req_type c) noexcept
             : type(c)
         {
         }
