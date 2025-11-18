@@ -71,15 +71,15 @@ void copyable()
     coroutine_env<string, int> env;
 
     string s("hello");
-    auto co1 = env.spawn([s](const auto& yield) {
-        printf("co1: initial_value from env: %d\n", *yield.initial_value());
+    auto co1 = env.spawn([s](const auto& yield, auto&& i) {
+        printf("co1: initial_value from env: %d\n", *i);
         auto n = yield(s);
         printf("co1: passed from env: %d\n", *n);
         [[maybe_unused]] auto m = yield("world");
         puts("--- NOT REACHED HERE!!! ---");
     });
 
-    auto x = co1.resume(10);  // not passed w/ 1st resume
+    auto x = co1.resume(10);  // pass by arg w/ 1st resume
     cout << "env: yields by co1: " << *x << endl;
     auto y = co1.resume(20);  // pass to coroutine
     cout << "env: yields by co1: " << *y << endl;
@@ -92,7 +92,6 @@ void noncopyable()
     struct non_copyable
     {
         string val;
-        non_copyable() noexcept = default;  // must be default constructible
         explicit non_copyable(const string& s)
             : val(s)
         {
@@ -105,10 +104,8 @@ void noncopyable()
 
     coroutine_env<non_copyable, non_copyable> env;
 
-    auto co1 = env.spawn([](const auto& yield) {
-        auto ival1 = yield.initial_value();
-        auto ival2 = yield.initial_value();
-        cout << "co1: initial_value: [" << ival1->val << "], 2nd: [" << ival2->val << "]" << endl;
+    auto co1 = env.spawn([](const auto& yield, auto&& init) {
+        cout << "co1: initial_value: " << init->val << endl;
 
         non_copyable nc("co1-1");
         auto x = yield(move(nc));

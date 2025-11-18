@@ -13,6 +13,8 @@
 #include <memory>
 #include <optional>
 #include <system_error>
+#include <type_traits>
+#include <variant>
 
 #ifndef COROUTINE_STACK_SIZE
 #define COROUTINE_STACK_SIZE (8 * 1024)
@@ -23,13 +25,16 @@ namespace tbd {
 namespace detail {
 struct co_null_type
 {};
+
+template <typename T>
+inline constexpr bool always_false_v = false;
 }  // namespace detail
 
-template <typename T = detail::co_null_type, typename U = detail::co_null_type>
+template <typename G = detail::co_null_type, typename A = detail::co_null_type>
 class coroutine_env
 {
-    using gen_type = std::optional<T>;
-    using ret_type = std::optional<U>;
+    using co_gen_type = std::optional<G>;
+    using co_arg_type = std::optional<A>;
     inline static constexpr char MAGIC[] = {0x7f, 'C', 'O', 'E'};
 
   public:
@@ -37,28 +42,23 @@ class coroutine_env
     class yielder
     {
       public:
-        ret_type operator()(gen_type&& g = {}) const
+        co_arg_type operator()(co_gen_type&& g = {}) const
         {
             assert_env();
-            return env_->yield(co_, std::forward<gen_type>(g));
+            return env_->yield(co_, std::forward<co_gen_type>(g));
         }
 
-        void exit(gen_type&& g = {}) const
+        void exit(co_gen_type&& g = {}) const
         {
             assert_env();
-            env_->exit(co_, std::forward<gen_type>(g));
-        }
-
-        ret_type initial_value() const
-        {
-            return std::move(const_cast<yielder*>(this)->co_->value_);
+            env_->exit(co_, std::forward<co_gen_type>(g));
         }
 
       private:
-        coroutine_env<T, U>* env_ = nullptr;
+        coroutine_env<G, A>* env_ = nullptr;
         coroutine* co_ = nullptr;
 
-        yielder(coroutine_env<T, U>* env, coroutine* co) noexcept
+        yielder(coroutine_env<G, A>* env, coroutine* co) noexcept
             : env_(env)
             , co_(co)
         {
@@ -67,7 +67,7 @@ class coroutine_env
         void assert_env() const
         {
             if (!env_ || ::memcmp(env_, MAGIC, sizeof(MAGIC)) != 0) {
-                throw std::invalid_argument("env expired");
+                throw std::invalid_argument("yielder: env expired");
             }
         }
 
@@ -75,12 +75,14 @@ class coroutine_env
     };
 
   private:
-    using coro_fn = std::function<void(const yielder&)>;
+    using coro_without_init = std::function<void(const yielder&)>;
+    using coro_with_init = std::function<void(const yielder&, co_arg_type&&)>;
+    using coro_fn = std::variant<coro_without_init, coro_with_init>;
 
   public:
     class coroutine
     {
-        friend class coroutine_env<T, U>;
+        friend class coroutine_env<G, A>;
 
       public:
         coroutine() = default;
@@ -125,12 +127,12 @@ class coroutine_env
             return !finished_;
         }
 
-        gen_type resume(ret_type&& r = {})
+        co_gen_type resume(co_arg_type&& a = {})
         {
             if (!stack_ || !env_ || ::memcmp(env_, MAGIC, sizeof(MAGIC)) != 0) {
-                throw std::invalid_argument("coroutine::resume: not initialized");
+                throw std::invalid_argument("coroutine: env expired");
             }
-            return env_->resume(this, std::forward<ret_type>(r));
+            return env_->resume(this, std::forward<co_arg_type>(a));
         }
 
       private:
@@ -138,12 +140,12 @@ class coroutine_env
         size_t stack_size_;
         char* stack_ = nullptr;
         bool finished_ = true;
-        coroutine_env<T, U>* env_ = nullptr;
+        coroutine_env<G, A>* env_ = nullptr;
         ucontext_t uctx_;
-        ret_type value_;
+        co_arg_type value_;
         std::exception_ptr exception_;
 
-        coroutine(coro_fn&& fn, size_t ss, coroutine_env<T, U>* env)
+        coroutine(coro_fn&& fn, size_t ss, coroutine_env<G, A>* env)
             : fn_(std::forward<coro_fn>(fn))
             , stack_size_(ss)
             , stack_(nullptr)
@@ -157,7 +159,7 @@ class coroutine_env
             size_t pagesz = ::sysconf(_SC_PAGE_SIZE);
             stack_size_ = (stack_size_ + pagesz - 1) & ~(pagesz - 1);  // align
             if (auto err = ::posix_memalign((void**)&stack_, pagesz, pagesz + stack_size_)) {
-                throw std::system_error(err, std::generic_category(), "posix_memalign");
+                throw std::system_error(err, std::generic_category(), "coroutine: posix_memalign");
             }
             ::mprotect(stack_, pagesz, PROT_NONE);  // guard page
 
@@ -168,11 +170,15 @@ class coroutine_env
             ::makecontext(&uctx_, (void (*)()) & entry, 1, (uintptr_t)this);
         }
 
-        static void entry(uintptr_t ptr)
+        static void entry(uintptr_t ptr) noexcept
         {
             auto* co = (coroutine*)ptr;
             try {
-                co->fn_(yielder(co->env_, co));
+                if (auto fn = std::get_if<coro_without_init>(&co->fn_)) {
+                    (*fn)(yielder(co->env_, co));
+                } else if (auto fn = std::get_if<coro_with_init>(&co->fn_)) {
+                    (*fn)(yielder(co->env_, co), std::move(co->value_));
+                }
             } catch (...) {
                 co->exception_ = std::current_exception();
             }
@@ -190,9 +196,6 @@ class coroutine_env
         }
     };  // class coroutine
 
-    friend class yielder;
-    friend class coroutine;
-
     /************************************************************************
      * coroutine_env
      */
@@ -200,7 +203,10 @@ class coroutine_env
     char magic_[4];
     std::unique_ptr<ucontext_t> uctx_ = nullptr;  // move safety
     coroutine* current_ = nullptr;
-    gen_type last_value_;
+    co_gen_type last_value_;
+
+    friend class yielder;
+    friend class coroutine;
 
   public:
     coroutine_env() noexcept
@@ -236,13 +242,20 @@ class coroutine_env
         ::memset(magic_, 0, sizeof(magic_));
     }
 
-    coroutine spawn(coro_fn&& fn, size_t ss = COROUTINE_STACK_SIZE)
+    template <typename F>
+    coroutine spawn(F&& fn, size_t ss = COROUTINE_STACK_SIZE)
     {
-        return coroutine(std::forward<coro_fn>(fn), ss, this);
+        if constexpr (std::is_invocable_v<F, const yielder&>) {
+            return coroutine(coro_without_init(std::forward<F>(fn)), ss, this);
+        } else if constexpr (std::is_invocable_v<F, const yielder&, co_arg_type&&>) {
+            return coroutine(coro_with_init(std::forward<F>(fn)), ss, this);
+        } else {
+            static_assert(detail::always_false_v<F>, "invalid coroutine signature");
+        }
     }
 
   private:
-    gen_type resume(coroutine* co, ret_type&& r = {})
+    co_gen_type resume(coroutine* co, co_arg_type&& r = {})
     {
         assert(!current_);
         if (co->finished_) {
@@ -253,8 +266,7 @@ class coroutine_env
         co->value_ = std::move(r);
         current_ = co;
         if (::swapcontext(uctx_.get(), &current_->uctx_) < 0) {
-            throw std::system_error(errno, std::generic_category(),
-                                    "coroutine_env::resume: swapcontext");
+            throw std::system_error(errno, std::generic_category(), "coroutine_env: swapcontext");
         }
 
         current_ = nullptr;
@@ -275,25 +287,24 @@ class coroutine_env
         }
     }
 
-    ret_type yield(coroutine* co, gen_type&& g = {})
+    co_arg_type yield(coroutine* co, co_gen_type&& g = {})
     {
         assert(current_);
         assert(current_->env_->uctx_.get() == uctx_.get());
 
-        last_value_ = std::forward<gen_type>(g);
+        last_value_ = std::forward<co_gen_type>(g);
         if (::swapcontext(&current_->uctx_, uctx_.get()) < 0) {
-            throw std::system_error(errno, std::generic_category(),
-                                    "coroutine_env::yield: swapcontext");
+            throw std::system_error(errno, std::generic_category(), "coroutine_env: swapcontext");
         }
 
         return std::move(co->value_);
     }
 
-    void exit(coroutine* co, gen_type&& g = {})
+    void exit(coroutine* co, co_gen_type&& g = {})
     {
         assert(current_);
         current_->finished_ = true;
-        (void)yield(co, std::forward<gen_type>(g));
+        (void)yield(co, std::forward<co_gen_type>(g));
     }
 };
 
