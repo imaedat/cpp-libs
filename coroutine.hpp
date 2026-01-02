@@ -2,7 +2,12 @@
 #define COROUTINE_HPP_
 
 #include <sys/mman.h>
+#ifdef COROUTINE_USE_SETJMP
+#include <setjmp.h>
+#include <signal.h>
+#else
 #include <ucontext.h>
+#endif
 #include <unistd.h>
 
 #include <cassert>
@@ -94,10 +99,19 @@ class coroutine_env
             , stack_(std::exchange(rhs.stack_, nullptr))
             , finished_(std::exchange(rhs.finished_, true))
             , env_(std::exchange(rhs.env_, nullptr))
+#ifdef COROUTINE_USE_SETJMP
+            , ss_(std::exchange(rhs.ss_, {}))
+#else
             , uctx_(std::exchange(rhs.uctx_, {}))
+#endif
             , value_(std::move(rhs.value_))
+            , exception_(std::move(rhs.exception_))
         {
+#ifdef COROUTINE_USE_SETJMP
+            ::memcpy(&uctx_, &rhs.uctx_, sizeof(jmp_buf));
+#else
             ::makecontext(&uctx_, (void (*)()) & entry, 1, (uintptr_t)this);
+#endif
         }
         coroutine& operator=(coroutine&& rhs) noexcept
         {
@@ -108,11 +122,19 @@ class coroutine_env
                 stack_ = std::exchange(rhs.stack_, nullptr);
                 finished_ = std::exchange(rhs.finished_, true);
                 env_ = std::exchange(rhs.env_, nullptr);
+#ifdef COROUTINE_USE_SETJMP
+                ss_ = std::exchange(rhs.ss_, {});
+                ::memcpy(&uctx_, &rhs.uctx_, sizeof(jmp_buf));
+#else
                 uctx_ = std::exchange(rhs.uctx_, {});
+#endif
                 value_ = std::move(rhs.value_);
+                exception_ = std::move(rhs.exception_);
+#ifndef COROUTINE_USE_SETJMP
                 ::makecontext(&uctx_, (void (*)()) & entry, 1, (uintptr_t)this);
                 // 1st argument of `entry`
                 // uctx_.uc_mcontext.gregs[REG_RDI] = (greg_t)this;
+#endif
             }
             return *this;
         }
@@ -141,7 +163,12 @@ class coroutine_env
         char* stack_ = nullptr;
         bool finished_ = true;
         coroutine_env<G, A>* env_ = nullptr;
+#ifdef COROUTINE_USE_SETJMP
+        stack_t ss_;
+        jmp_buf uctx_;
+#else
         ucontext_t uctx_;
+#endif
         co_arg_type value_;
         std::exception_ptr exception_;
 
@@ -152,9 +179,11 @@ class coroutine_env
             , finished_(false)
             , env_(env)
         {
+#ifndef COROUTINE_USE_SETJMP
             if (::getcontext(&uctx_) < 0) {
                 throw std::system_error(errno, std::generic_category(), "coroutine: getcontext");
             }
+#endif
 
             size_t pagesz = ::sysconf(_SC_PAGE_SIZE);
             stack_size_ = (stack_size_ + pagesz - 1) & ~(pagesz - 1);  // align
@@ -163,11 +192,16 @@ class coroutine_env
             }
             ::mprotect(stack_, pagesz, PROT_NONE);  // guard page
 
+#ifdef COROUTINE_USE_SETJMP
+            ss_.ss_flags = 0;
+            ss_.ss_size = stack_size_;
+            ss_.ss_sp = stack_ + pagesz;
+#else
             uctx_.uc_stack.ss_sp = stack_ + pagesz;
             uctx_.uc_stack.ss_size = stack_size_;
             uctx_.uc_link = env_->uctx_.get();
-
             ::makecontext(&uctx_, (void (*)()) & entry, 1, (uintptr_t)this);
+#endif
         }
 
         static void entry(uintptr_t ptr) noexcept
@@ -201,7 +235,12 @@ class coroutine_env
      */
   private:
     char magic_[4];
+#ifdef COROUTINE_USE_SETJMP
+    jmp_buf* uctx_ = nullptr;  // move safety
+    inline static const int SIGSPAWN = SIGRTMAX - 1;
+#else
     std::unique_ptr<ucontext_t> uctx_ = nullptr;  // move safety
+#endif
     coroutine* current_ = nullptr;
     co_gen_type last_value_;
 
@@ -209,10 +248,19 @@ class coroutine_env
     friend class coroutine;
 
   public:
-    coroutine_env() noexcept
+    coroutine_env()
+#ifndef COROUTINE_USE_SETJMP
+        noexcept
         : uctx_(std::make_unique<ucontext_t>())
+#endif
     {
         ::memcpy(magic_, MAGIC, sizeof(magic_));
+#ifdef COROUTINE_USE_SETJMP
+        uctx_ = (jmp_buf*)malloc(sizeof(jmp_buf));
+        if (!uctx_) {
+            throw std::system_error(errno, std::generic_category(), "coroutine_env: malloc");
+        }
+#endif
     }
 
     coroutine_env(const coroutine_env&) = delete;
@@ -239,22 +287,70 @@ class coroutine_env
 
     ~coroutine_env() noexcept
     {
+#ifdef COROUTINE_USE_SETJMP
+        if (!uctx_) {
+            ::free(uctx_);
+        }
+#endif
         ::memset(magic_, 0, sizeof(magic_));
     }
 
     template <typename F>
     coroutine spawn(F&& fn, size_t ss = COROUTINE_STACK_SIZE)
     {
+        coroutine co;
         if constexpr (std::is_invocable_v<F, const yielder&>) {
-            return coroutine(coro_without_init(std::forward<F>(fn)), ss, this);
+            co = coroutine(coro_without_init(std::forward<F>(fn)), ss, this);
         } else if constexpr (std::is_invocable_v<F, const yielder&, co_arg_type&&>) {
-            return coroutine(coro_with_init(std::forward<F>(fn)), ss, this);
+            co = coroutine(coro_with_init(std::forward<F>(fn)), ss, this);
         } else {
             static_assert(detail::always_false_v<F>, "invalid coroutine signature");
         }
+
+#ifdef COROUTINE_USE_SETJMP
+        if (::sigaltstack(&co.ss_, nullptr) < 0) {
+            throw std::system_error(errno, std::generic_category(),
+                                    "coroutine_env::spawn: sigaltstack");
+        }
+
+        struct sigaction act;
+        act.sa_sigaction = spawn_handler;
+        act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND | SA_RESTART;
+        if (::sigaction(SIGSPAWN, &act, nullptr) < 0) {
+            throw std::system_error(errno, std::generic_category(),
+                                    "coroutine_env::spawn: sigaction");
+        }
+        union sigval sv;
+        sv.sival_ptr = &co;
+        ::sigqueue(::getpid(), SIGSPAWN, sv);
+
+        stack_t oss;
+        oss.ss_flags = SS_DISABLE;
+        if (::sigaltstack(&oss, nullptr) < 0) {
+            throw std::system_error(errno, std::generic_category(),
+                                    "coroutine_env::spawn: sigaltstack");
+        }
+#endif
+
+        return co;
     }
 
   private:
+#ifdef COROUTINE_USE_SETJMP
+    static void spawn_handler(int signum, siginfo_t* si, void*)
+    {
+        assert(signum == SIGSPAWN);
+
+        auto* co = (coroutine*)si->si_value.sival_ptr;
+        if (::setjmp(co->uctx_) == 0) {
+            return;
+        }
+
+        coroutine::entry((uintptr_t)co);
+        co->env_->exit(co);
+    }
+#endif
+
     co_gen_type resume(coroutine* co, co_arg_type&& r = {})
     {
         assert(!current_);
@@ -265,9 +361,15 @@ class coroutine_env
 
         co->value_ = std::move(r);
         current_ = co;
+#ifdef COROUTINE_USE_SETJMP
+        if (::setjmp(*uctx_) == 0) {
+            ::longjmp(co->uctx_, 1);
+        }
+#else
         if (::swapcontext(uctx_.get(), &current_->uctx_) < 0) {
             throw std::system_error(errno, std::generic_category(), "coroutine_env: swapcontext");
         }
+#endif
 
         current_ = nullptr;
         if (co->exception_) {
@@ -290,12 +392,22 @@ class coroutine_env
     co_arg_type yield(coroutine* co, co_gen_type&& g = {})
     {
         assert(current_);
+#ifdef COROUTINE_USE_SETJMP
+        assert(current_->env_->uctx_ == uctx_);
+#else
         assert(current_->env_->uctx_.get() == uctx_.get());
+#endif
 
         last_value_ = std::forward<co_gen_type>(g);
+#ifdef COROUTINE_USE_SETJMP
+        if (::setjmp(co->uctx_) == 0) {
+            ::longjmp(*uctx_, 1);
+        }
+#else
         if (::swapcontext(&current_->uctx_, uctx_.get()) < 0) {
             throw std::system_error(errno, std::generic_category(), "coroutine_env: swapcontext");
         }
+#endif
 
         return std::move(co->value_);
     }
