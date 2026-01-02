@@ -62,12 +62,20 @@ void readwrite_mutex(thread_pool& pool)
     for (int i = 0; i < 10; ++i) {
         pool.submit([&, i] {
             LOG("task-%02d: start\n", i);
-            const char* role = is_writer(i) ? "write" : "read";
             auto ms = random() % 800;
-            auto guard = is_writer(i) ? str.lock() : str.lock_shared();
-            LOG("task-%02d: acquire %s lock, work for %lu ms ...\n", i, role, ms);
-            usleep(ms * 1000);
-            LOG("task-%02d: release %s lock\n", i, role);
+            if (is_writer(i)) {
+                auto s = str.lock();
+                LOG("task-%02d: acquire write lock(%s), work for %lu ms ...\n", i, s->c_str(), ms);
+                usleep(ms * 1000);
+                LOG("task-%02d: release write lock\n", i);
+                // s->clear();  // compile ok
+            } else {
+                auto s = str.lock_shared();
+                LOG("task-%02d: acquire read lock(%s), work for %lu ms ...\n", i, s->c_str(), ms);
+                usleep(ms * 1000);
+                LOG("task-%02d: release read lock\n", i);
+                // s->clear();  // compile error
+            }
         });
     }
 

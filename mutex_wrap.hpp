@@ -13,10 +13,11 @@ namespace tbd {
 template <typename T, typename M = std::mutex>
 class mutex_wrap
 {
+    using Deleter = std::function<void(T*)>;
+
   protected:
     T data_;
     std::unique_ptr<M> mtx_;
-    using Deleter = std::function<void(T*)>;
 
     void assert_mutex_alive() const
     {
@@ -34,15 +35,12 @@ class mutex_wrap
 
     virtual ~mutex_wrap() noexcept = default;
 
-    std::unique_ptr<T, Deleter> lock()
+    [[nodiscard]] std::unique_ptr<T, Deleter> lock()
     {
         assert_mutex_alive();
 
         mtx_->lock();
-        return std::unique_ptr<T, Deleter>(&data_, [this](T* p) {
-            (void)p;
-            mtx_->unlock();
-        });
+        return std::unique_ptr<T, Deleter>(&data_, [this](T*) { mtx_->unlock(); });
     }
 
     template <typename F, typename = std::enable_if_t<std::is_invocable_v<F, T&>>>
@@ -63,7 +61,7 @@ class mutex_wrap
 template <typename T>
 class rwlock_wrap : public mutex_wrap<T, std::shared_mutex>
 {
-    using Deleter = typename mutex_wrap<T, std::shared_mutex>::Deleter;
+    using Deleter = std::function<void(const T*)>;
 
   public:
     rwlock_wrap(T&& data)
@@ -71,18 +69,16 @@ class rwlock_wrap : public mutex_wrap<T, std::shared_mutex>
     {
     }
 
-    std::unique_ptr<T, Deleter> lock_shared()
+    [[nodiscard]] std::unique_ptr<const T, Deleter> lock_shared()
     {
         this->assert_mutex_alive();
 
         this->mtx_->lock_shared();
-        return std::unique_ptr<T, Deleter>(&this->data_, [this](T* p) {
-            (void)p;
-            this->mtx_->unlock_shared();
-        });
+        return std::unique_ptr<const T, Deleter>(&this->data_,
+                                                 [this](const T*) { this->mtx_->unlock_shared(); });
     }
 
-    template <typename F, typename = std::enable_if_t<std::is_invocable_v<F, T&>>>
+    template <typename F, typename = std::enable_if_t<std::is_invocable_v<F, const T&>>>
     void lock_shared(F&& fn)
     {
         this->assert_mutex_alive();
