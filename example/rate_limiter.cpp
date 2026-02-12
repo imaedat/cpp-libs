@@ -1,4 +1,4 @@
-#define RATE_LIMITR_VERBOSE
+#define RATE_LIMITER_VERBOSE
 #include "rate_limiter.hpp"
 
 #include <signal.h>
@@ -11,43 +11,32 @@
 #include <memory>
 #include <string>
 
+#include "util.h"
+
 using namespace std;
 using namespace std::chrono;
 using namespace std::literals::chrono_literals;
 using namespace tbd;
 
-inline char* now()
-{
-    thread_local char buf[32] = {0};
-
-    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
-    auto sec = count / (1000 * 1000);
-    auto usec = count % (1000 * 1000);
-    struct tm tm;
-    localtime_r(&sec, &tm);
-    strftime(buf, 21, "%F %T.", &tm);
-    sprintf(buf + 20, "%06ld", usec);
-    return buf;
-}
-
-#define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
-
-static steady_clock::time_point start;
-static unsigned long total = 0;
+static steady_clock::time_point start_;
+static unsigned long total_ = 0;
 
 static void handler(int)
 {
-    auto elapsed = duration_cast<microseconds>(steady_clock::now() - start).count();
-    auto rate = 1.0 * total * (1000 * 1000) / elapsed;
-    printf("\nelapsed=%lu ms, total=%lu, %f per second\n", elapsed / 1000, total, rate);
+    auto elapsed = duration_cast<microseconds>(steady_clock::now() - start_).count();
+    auto rate = 1.0 * total_ * (1000 * 1000) / elapsed;
+    printf("\nelapsed=%lu ms, total=%lu, %f per second\n", elapsed / 1000, total_, rate);
     exit(0);
 }
 
 #define r(n) (random() % (n))
 
+#define WAIT_IN_REQUEST
+
 int main(int argc, char* argv[])
 {
     signal(SIGINT, handler);
+    signal(SIGTERM, handler);
 
     srandom(time(nullptr));
 
@@ -65,15 +54,25 @@ int main(int argc, char* argv[])
         lim = make_unique<sliding_window_counter>(limit, window);
     }
 
-    start = steady_clock::now();
+    start_ = steady_clock::now();
     while (true) {
-        int count = 1 + r(3);
-        auto waitms = r(300);
-        bool ok = lim->try_request(count);
-        LOG("req=%d, result=%s\n", count, (ok ? "success" : "denied"));
+        int count = 1 + r(4);
+        [[maybe_unused]] auto waitms = r(300);
+        auto t1 = steady_clock::now();
+        bool ok = true;
+#ifdef WAIT_IN_REQUEST
+        lim->request(count);
+#else
+        std::tie(ok, std::ignore) = lim->try_request(count);
+#endif
+        auto t2 = steady_clock::now();
+        LOG("req=%d, result=%s, time=%ld us\n", count, (ok ? "success" : "denied"),
+            duration_cast<microseconds>(t2 - t1).count());
         if (ok) {
-            total += count;
+            total_ += count;
         }
+#ifndef WAIT_IN_REQUEST
         usleep(waitms * 1000);
+#endif
     }
 }
