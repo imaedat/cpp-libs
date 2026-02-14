@@ -25,13 +25,11 @@ class rate_limiter
   protected:
     uint64_t limit_;
     std::chrono::nanoseconds window_;
-    double rate_;
 
     template <typename Duration>
     rate_limiter(uint64_t limit, Duration window)
         : limit_(limit)
         , window_(window)
-        , rate_(1.0 * limit_ / window_.count())
     {
     }
 };
@@ -58,7 +56,7 @@ class token_bucket : public rate_limiter
         if (elapsed >= window_) {
             tokens_left_ = limit_;
         } else {
-            refills = (unsigned)std::round((limit_ * elapsed) / window_);
+            refills = (unsigned)std::round(elapsed * limit_ / window_);
             tokens_left_ = std::min(tokens_left_ + refills, limit_);
         }
         last_requested_ = now;
@@ -79,13 +77,13 @@ class token_bucket : public rate_limiter
 
     void request(int64_t quantity) override
     {
-        auto [ok, wait_ns] = try_request(quantity);
+        auto [ok, retry_after] = try_request(quantity);
         if (!ok) {
 #ifdef RATE_LIMITER_VERBOSE
             printf(" *** [token_bucket] not enough tokens! wait for %lu ms ***\n",
-                   wait_ns.count() / (1000 * 1000));
+                   retry_after.count() / (1000 * 1000));
 #endif
-            std::this_thread::sleep_for(wait_ns);
+            std::this_thread::sleep_for(retry_after);
             tokens_left_ = 0;
             last_requested_ = std::chrono::steady_clock::now();
         }
@@ -135,19 +133,30 @@ class sliding_window_log : public rate_limiter
             return {true, std::chrono::nanoseconds{0}};
         }
 
+#if 1  // XXX
         return {false, -balance * window_ / limit_};
+#else
+        int64_t should_pop = 0;
+        for (const auto& e : log_) {
+            should_pop += e.quantity;
+            if (should_pop >= (-balance)) {
+                return {false, e.arrived_at + window_ - now};
+            }
+        }
+        assert(false);
+#endif
     }
 
     void request(int64_t quantity) override
     {
-        auto [ok, wait_ns] = try_request(quantity);
+        auto [ok, retry_after] = try_request(quantity);
         if (!ok) {
 
 #ifdef RATE_LIMITER_VERBOSE
-            printf(" *** [sliding_window_log] window amount over! wait for %lu ms ***\n",
-                   wait_ns.count() / (1000 * 1000));
+            printf(" *** [sliding_window_log] window limit over! wait for %lu ms ***\n",
+                   retry_after.count() / (1000 * 1000));
 #endif
-            std::this_thread::sleep_for(wait_ns);
+            std::this_thread::sleep_for(retry_after);
             log_.emplace_back(log_entry{std::chrono::steady_clock::now(), (uint64_t)quantity});
             amount_in_window_ += quantity;
         }
@@ -202,35 +211,33 @@ class sliding_window_counter : public rate_limiter
             return {true, std::chrono::nanoseconds{0}};
         }
 
-        auto wait_ns = (uint64_t)std::round(-balance * window_.count() / limit_);
-        return {false, std::chrono::nanoseconds{wait_ns}};
+        auto retry_after = (uint64_t)std::round(-balance * window_.count() / limit_);
+        return {false, std::chrono::nanoseconds{retry_after}};
     }
 
     void request(int64_t quantity) override
     {
-        auto [ok, wait_ns] = try_request(quantity);
+        auto [ok, retry_after] = try_request(quantity);
         if (!ok) {
 #ifdef RATE_LIMITER_VERBOSE
-            printf(" *** [sliding_window_counter] not enough space! wait for %lu ms ***\n",
-                   wait_ns.count() / (1000 * 1000));
+            printf(" *** [sliding_window_counter] window limit over! wait for %lu ms ***\n",
+                   retry_after.count() / (1000 * 1000));
 #endif
-            std::this_thread::sleep_for(wait_ns);
+            std::this_thread::sleep_for(retry_after);
 
             auto [periods, _] = elapsed_periods();
-            if (periods > 0) {
-                for (auto i = 0U; i < periods; ++i) {
-                    int64_t currwin_space = limit_ - (int64_t)currwin_amount_;
-                    if (currwin_space >= quantity) {
-                        currwin_amount_ += quantity;
-                        quantity = 0;
-                    } else {
-                        quantity -= currwin_space;
-                        currwin_amount_ = limit_;
-                    }
-                    prevwin_amount_ = currwin_amount_;
-                    currwin_amount_ = 0;
-                    end_of_window_ += window_;
+            for (auto i = 0U; i < periods; ++i) {
+                int64_t currwin_space = limit_ - (int64_t)currwin_amount_;
+                if (currwin_space >= quantity) {
+                    currwin_amount_ += quantity;
+                    quantity = 0;
+                } else {
+                    quantity -= currwin_space;
+                    currwin_amount_ = limit_;
                 }
+                prevwin_amount_ = currwin_amount_;
+                currwin_amount_ = 0;
+                end_of_window_ += window_;
             }
             currwin_amount_ += quantity;
         }
