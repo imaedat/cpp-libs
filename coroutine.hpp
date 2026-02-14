@@ -23,7 +23,7 @@
 #include <variant>
 
 #ifndef COROUTINE_STACK_SIZE
-#define COROUTINE_STACK_SIZE (8 * 1024)
+#define COROUTINE_STACK_SIZE (64 * 1024)
 #endif
 
 namespace tbd {
@@ -62,7 +62,7 @@ class coroutine_env
       private:
         context* ctx_ = nullptr;
 
-        yielder(context* ctx) noexcept
+        explicit yielder(context* ctx) noexcept
             : ctx_(ctx)
         {
         }
@@ -257,7 +257,7 @@ class coroutine_env
     }
 
     template <typename F>
-    coroutine spawn(F&& fn, size_t ss = COROUTINE_STACK_SIZE)
+    coroutine spawn(F&& fn, size_t ss = COROUTINE_STACK_SIZE) &
     {
         coroutine co;
         if constexpr (std::is_invocable_v<F, const yielder&>) {
@@ -293,6 +293,9 @@ class coroutine_env
 
         return co;
     }
+
+    template <typename F>
+    coroutine spawn(F&& fn, size_t ss = COROUTINE_STACK_SIZE) && = delete;
 
   private:
 #ifdef COROUTINE_USE_SETJMP
