@@ -62,6 +62,7 @@ class logger
         explicit policy_base(size_t m)
             : max_msgs_(m)
         {
+            assert(max_msgs_ > 0);
         }
     };
 
@@ -291,6 +292,10 @@ class logger
             req.tid = ::syscall(SYS_gettid);
             req.level = lv;
             req.message = format(pass(fmt), pass(args)...);
+            if (req.message.empty()) {
+                ::fprintf(stderr, "logger: format error message by %d:%d\n", pid_, req.tid);
+                return;
+            }
 
             std::unique_lock<decltype(mtx_)> lk(mtx_);
             if (policy_->can_append(msgq_, lk)) {
@@ -326,6 +331,9 @@ class logger
         static constexpr int INITSZ = 512;
         char buf[INITSZ] = {0};
         auto result = ::snprintf(buf, INITSZ, args...);
+        if (result < 0) {
+            return "";
+        }
         if (result < INITSZ) {
             return {buf, (size_t)result};
         }
@@ -352,36 +360,41 @@ class logger
      */
     void writer()
     {
-        std::unique_lock<decltype(mtx_)> lk(mtx_);
-        while (true) {
-            cv_.wait(lk, [this] { return !msgq_.empty(); });
+        try {
+            std::unique_lock<decltype(mtx_)> lk(mtx_);
+            while (true) {
+                cv_.wait(lk, [this] { return !msgq_.empty(); });
 
-            auto req = std::move(msgq_.front());
-            msgq_.pop_front();
-            lk.unlock();
-            policy_->notify();
+                auto req = std::move(msgq_.front());
+                msgq_.pop_front();
+                lk.unlock();
+                policy_->notify();
 
-            switch (req.type) {
-            case req_type::log:
-                log_msg(req);
-                break;
+                switch (req.type) {
+                case req_type::log:
+                    log_msg(req);
+                    break;
 
-            case req_type::flush:
-                ::fflush(fp_);
-                break;
+                case req_type::flush:
+                    ::fflush(fp_);
+                    break;
 
-            case req_type::rotate:
-                log_rotate();
-                break;
+                case req_type::rotate:
+                    log_rotate();
+                    break;
 
-            case req_type::close:
-                goto close;
+                case req_type::close:
+                    goto close;
 
-            default:
-                break;
+                default:
+                    break;
+                }
+
+                lk.lock();
             }
 
-            lk.lock();
+        } catch (const std::exception& e) {
+            ::fprintf(stderr, "logger: unexpected exception: %s\n", e.what());
         }
 
     close:
@@ -389,7 +402,7 @@ class logger
         ::fclose(fp_);
     }
 
-    void log_msg(const request& req)
+    void log_msg(const request& req) noexcept
     {
         static constexpr const char* const level_s[] = {"quiet", "fatal", "error", "warn",
                                                         "info",  "debug", "trace"};
