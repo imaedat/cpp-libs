@@ -44,7 +44,7 @@ void normal_mutex(thread_pool& pool)
 
     puts("---");
     {
-        unique_lock lk(*str);
+        unique_lock lk(str.native_mutex());
         condition_variable cv;
         cv.wait_for(lk, milliseconds(500));
     }
