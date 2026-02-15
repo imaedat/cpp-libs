@@ -4,7 +4,9 @@
 #include <errno.h>
 #include <semaphore.h>
 
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <system_error>
 
@@ -23,17 +25,8 @@ class semaphore
 
     semaphore(const semaphore&) = delete;
     semaphore& operator=(const semaphore&) = delete;
-    semaphore(semaphore&& rhs) noexcept
-        : sem_(std::move(rhs.sem_))
-    {
-    }
-    semaphore& operator=(semaphore&& rhs) noexcept
-    {
-        if (this != &rhs) {
-            sem_ = std::move(rhs.sem_);
-        }
-        return *this;
-    }
+    semaphore(semaphore&&) noexcept = default;
+    semaphore& operator=(semaphore&&) noexcept = default;
 
     ~semaphore() noexcept
     {
@@ -42,23 +35,23 @@ class semaphore
         }
     }
 
-    void release() const
+    void release()
     {
         if (::sem_post(sem_.get()) < 0) {
             throw std::system_error(errno, std::generic_category());
         }
     }
 
-    void acquire() const
+    void acquire()
     {
         if (::sem_wait(sem_.get()) < 0) {
             throw std::system_error(errno, std::generic_category());
         }
     }
 
-    bool try_acquire(long timeout_ms = 0) const
+    bool try_acquire(long wait_ms = 0)
     {
-        if (timeout_ms == 0) {
+        if (wait_ms == 0) {
             int ret = ::sem_trywait(sem_.get());
             if (ret == 0) {
                 return true;
@@ -70,7 +63,7 @@ class semaphore
         } else {
             using namespace std::chrono;
             auto abs_nsec = duration_cast<nanoseconds>(
-                                (system_clock::now() + milliseconds(timeout_ms)).time_since_epoch())
+                                (system_clock::now() + milliseconds(wait_ms)).time_since_epoch())
                                 .count();
             struct timespec abs_timeout;
             abs_timeout.tv_sec = abs_nsec / (1000L * 1000 * 1000);
@@ -99,18 +92,71 @@ class parker
     {
     }
 
-    void park() const
+    void park()
     {
         sem_.acquire();
     }
 
-    void unpark() const
+    void unpark()
     {
         sem_.release();
     }
 
   private:
     semaphore sem_;
+};
+
+class wait_group
+{
+  public:
+    explicit wait_group(int nmemb = 0)
+        : sem_(0)
+        , nmemb_(nmemb)
+    {
+    }
+
+    void add(int delta = 1)
+    {
+        nmemb_ += delta;
+    }
+
+    void done()
+    {
+        sem_.release();
+    }
+
+    bool wait(int wait_ms = -1)
+    {
+        if (wait_ms == -1) {
+            while (nmemb_ > 0) {
+                sem_.acquire();
+                --nmemb_;
+            }
+
+        } else {
+            using namespace std::chrono;
+            auto remaining_ms = wait_ms;
+            while (nmemb_ > 0) {
+                auto t = steady_clock::now();
+                if (!sem_.try_acquire(remaining_ms)) {
+                    return false;
+                }
+                auto elapsed_ms = (long)std::round(
+                    duration_cast<duration<float, std::milli>>(steady_clock::now() - t).count());
+                if (elapsed_ms >= remaining_ms) {
+                    return false;
+                }
+                remaining_ms -= elapsed_ms;
+                --nmemb_;
+            }
+        }
+
+        return true;
+    }
+
+  private:
+    semaphore sem_;
+    std::atomic<int> nmemb_{0};
 };
 
 }  // namespace tbd
