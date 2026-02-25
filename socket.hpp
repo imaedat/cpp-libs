@@ -424,11 +424,18 @@ class io_socket_model : virtual public io_socket_concept
     std::error_code send(const void* buf, size_t size,
                          size_t* nsent = nullptr) const noexcept override
     {
+    again:
         auto n = write_fn_(io_handle(), buf, size);
         if (nsent) {
             *nsent = n;
         }
-        return handle_error(n);
+        // return handle_error(n);
+        auto ec = handle_error(n);
+        if (ec.value() == EAGAIN || ec.value() == EWOULDBLOCK || ec.value() == ENOBUFS) {
+            wait_writable();
+            goto again;
+        }
+        return ec;
     }
 
     std::error_code send(std::string_view msg, size_t* nsent = nullptr) const noexcept override
@@ -1171,6 +1178,7 @@ class tls_socket
     // non-blocking handshake
     bool handshake_nb_() const
     {
+    again:
         auto ret = handshake_fn_(ssl_.get());
         if (ret >= 1) {
             print_cipher();
@@ -1179,6 +1187,10 @@ class tls_socket
 
         int err = ssl_error_code(ret);
         assert(err != 0);
+        if (err == ENOBUFS) {
+            wait_writable();
+            goto again;
+        }
         if (err == EAGAIN) {
             return false;
         }
@@ -1203,6 +1215,8 @@ class tls_socket
             return 0;
         case SSL_ERROR_WANT_READ:
             return EAGAIN;
+        case SSL_ERROR_WANT_WRITE:
+            return ENOBUFS;
         case SSL_ERROR_ZERO_RETURN:
             return ENOENT;
         case SSL_ERROR_SSL:
