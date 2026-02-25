@@ -49,11 +49,10 @@ namespace tbd {
 #define THROW_SSLERR(f)                                                                            \
     throw std::runtime_error(std::string(f) + " " + ::ERR_error_string(::ERR_get_error(), nullptr));
 
-#define USE_GETADDRINFO
-
 /****************************************************************************
  * Resolver
  */
+#define SOCKET_USE_GETADDRINFO
 class resolver
 {
   public:
@@ -471,16 +470,18 @@ class tcp_socket : public io_socket_model<int>
   public:
     tcp_socket(tcp_socket&& rhs) noexcept
         : socket_base(std::move(rhs))
-        , io_socket_model<int>(std::exchange(rhs.read_fn_, nullptr),
-                               std::exchange(rhs.write_fn_, nullptr))
+        , io_socket_model<int>(std::move(rhs))
+    //, io_socket_model<int>(std::exchange(rhs.read_fn_, nullptr),
+    //                       std::exchange(rhs.write_fn_, nullptr))
     {
     }
     tcp_socket& operator=(tcp_socket&& rhs) noexcept
     {
         if (this != &rhs) {
             socket_base::operator=(std::move(rhs));
-            read_fn_ = std::exchange(rhs.read_fn_, nullptr);
-            write_fn_ = std::exchange(rhs.write_fn_, nullptr);
+            io_socket_model<int>::operator=(std::move(rhs));
+            // read_fn_ = std::exchange(rhs.read_fn_, nullptr);
+            // write_fn_ = std::exchange(rhs.write_fn_, nullptr);
         }
         return *this;
     }
@@ -1094,8 +1095,9 @@ class tls_socket
   public:
     tls_socket(tls_socket&& rhs) noexcept
         : socket_base(std::move(rhs))
-        , io_socket_model<SSL*>(std::exchange(rhs.read_fn_, nullptr),
-                                std::exchange(rhs.write_fn_, nullptr))
+        , io_socket_model<SSL*>(std::move(rhs))
+        //, io_socket_model<SSL*>(std::exchange(rhs.read_fn_, nullptr),
+        //                        std::exchange(rhs.write_fn_, nullptr))
         , secure_socket_base(std::move(rhs.ctx_), std::move(rhs.ssl_))
         , is_server_(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method())
         , handshake_fn_(is_server_ ? ::SSL_accept : ::SSL_connect)
@@ -1105,8 +1107,9 @@ class tls_socket
     {
         if (this != &rhs) {
             socket_base::operator=(std::move(rhs));
-            read_fn_ = std::exchange(rhs.read_fn_, nullptr);
-            write_fn_ = std::exchange(rhs.write_fn_, nullptr);
+            io_socket_model<SSL*>::operator=(std::move(rhs));
+            // read_fn_ = std::exchange(rhs.read_fn_, nullptr);
+            // write_fn_ = std::exchange(rhs.write_fn_, nullptr);
             ctx_ = std::move(rhs.ctx_);
             ssl_ = std::move(rhs.ssl_);
             is_server_ = rhs.is_server_;
@@ -1317,7 +1320,7 @@ class tls_server
         assert(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method());
     }
 
-    explicit tls_server(const ssl_ctx& ctx, uint16_t port, int backlog = 1024)
+    tls_server(const ssl_ctx& ctx, uint16_t port, int backlog = 1024)
         : tls_server(ctx, "", port, backlog)
     {
     }
@@ -1343,8 +1346,9 @@ class tls_server
         auto new_ssl = ctx_.new_ssl(new_tcp);
         auto new_tls = std::make_unique<detail::tls_socket>(detail::tls_socket(std::move(new_ssl)));
         new_tls->handshake_(remains);
-        std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast(
-            static_cast<detail::io_socket_model<SSL*>*>(new_tls.release()));
+        // std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast(
+        //     static_cast<detail::io_socket_model<SSL*>*>(new_tls.release()));
+        std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast = std::move(new_tls);
         return io_socket(new_tls_cast);
     }
 
@@ -1367,8 +1371,9 @@ class tls_server
                     return io_socket();
                 }
                 accept_state_ = state::waiting;
-                std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast(
-                    static_cast<detail::io_socket_model<SSL*>*>(new_tls_.release()));
+                // std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast(
+                //     static_cast<detail::io_socket_model<SSL*>*>(new_tls_.release()));
+                std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast = std::move(new_tls_);
                 return io_socket(new_tls_cast);
             } catch (...) {
                 new_tls_ = nullptr;
@@ -1393,6 +1398,10 @@ class tls_server
     } accept_state_{state::waiting};
 };
 #endif
+
+#undef THROW_SSLERR
+#undef SYSCALL
+#undef THROW_SYSERR
 
 }  // namespace tbd
 
