@@ -80,9 +80,8 @@ class resolver
         }
 
         // 本当は名前引きの処理がブロックするので良くない
-#ifdef USE_GETADDRINFO
-        struct addrinfo hints, *result = nullptr;
-        ::memset(&hints, 0, sizeof(struct addrinfo));
+#ifdef SOCKET_USE_GETADDRINFO
+        struct addrinfo hints = {}, *result = nullptr;
         hints.ai_family = AF_INET;
         auto err = ::getaddrinfo(host.data(), nullptr, &hints, &result);
         if (err == 0 && result) {
@@ -114,9 +113,8 @@ class resolver
             return it->first;
         }
 
-        struct sockaddr_in addr;
+        struct sockaddr_in addr = {};
         char host[NI_MAXHOST] = {0};
-        ::memset(&addr, 0, sizeof(addr));
         if (::inet_pton(AF_INET, ipaddr.data(), &addr.sin_addr) != 1) {
             return "";
         }
@@ -146,6 +144,72 @@ class resolver
     resolver() noexcept = default;
 };
 
+class endpoint
+{
+    const std::string addr_{};
+    const uint16_t port_ = 0;
+
+  public:
+    endpoint(const std::string& a, uint16_t p)
+        : addr_(a)
+        , port_(p)
+    {
+    }
+
+    std::string address() const noexcept
+    {
+        return addr_;
+    }
+
+    uint16_t port() const noexcept
+    {
+        return port_;
+    }
+
+    std::string to_string() const
+    {
+        return addr_ + ":" + std::to_string(port_);
+    }
+};
+
+class io_result
+{
+    const std::error_code ec_{};
+    const size_t nbytes_ = 0;
+
+  public:
+    explicit io_result(int err = 0, size_t n = 0)
+        : ec_(err, std::generic_category())
+        , nbytes_(n)
+    {
+    }
+
+    explicit operator bool() const noexcept
+    {
+        return !bool(ec_);
+    }
+
+    int code() const noexcept
+    {
+        return ec_.value();
+    }
+
+    std::string message() const
+    {
+        return ec_.message();
+    }
+
+    size_t nbytes() const noexcept
+    {
+        return nbytes_;
+    }
+
+    bool would_block() const noexcept
+    {
+        return ec_.value() == EAGAIN || ec_.value() == EWOULDBLOCK || ec_.value() == ENOBUFS;
+    }
+};
+
 class tcp_server;
 
 namespace detail {
@@ -165,6 +229,7 @@ class socket_base
     socket_base& operator=(socket_base&& rhs) noexcept
     {
         if (this != &rhs) {
+            close();
             raw_fd_ = std::exchange(rhs.raw_fd_, -1);
         }
         return *this;
@@ -233,7 +298,7 @@ class socket_base
         setsockopt_(IPPROTO_TCP, tcp_optname, val);
     }
 
-    std::pair<std::string, uint16_t> local_endpoint() const
+    endpoint local_endpoint() const
     {
         struct sockaddr_in addr;
         socklen_t addrlen = sizeof(addr);
@@ -278,7 +343,7 @@ class socket_base
 
     bool poll_(int events, int timeout_ms = 0) const
     {
-        struct pollfd fds;
+        struct pollfd fds = {};
         fds.fd = handle();
         fds.events = events;
         fds.revents = 0;
@@ -308,20 +373,14 @@ class io_socket_concept : virtual public socket_base
         return *this;
     }
 
-    virtual std::pair<std::string, uint16_t> remote_endpoint() const = 0;
-    virtual std::error_code recv_nb(void* buf, size_t size,
-                                    size_t* nrecv = nullptr) const noexcept = 0;
-    virtual std::error_code recv_some(void* buf, size_t size, int timeout_ms,
-                                      size_t* nrecv = nullptr) const noexcept = 0;
-    virtual std::error_code recv_some(void* buf, size_t size,
-                                      size_t* nrecv = nullptr) const noexcept = 0;
-    virtual std::error_code recv(void* buf, size_t size, int timeout_ms,
-                                 size_t* nrecv = nullptr) const noexcept = 0;
-    virtual std::error_code recv(void* buf, size_t size,
-                                 size_t* nrecv = nullptr) const noexcept = 0;
-    virtual std::error_code send(const void* buf, size_t size,
-                                 size_t* nsent = nullptr) const noexcept = 0;
-    virtual std::error_code send(std::string_view msg, size_t* nsent = nullptr) const noexcept = 0;
+    virtual endpoint remote_endpoint() const = 0;
+    virtual io_result recv_nb(void* buf, size_t size) const noexcept = 0;
+    virtual io_result recv_some(void* buf, size_t size, int timeout_ms = -1) const = 0;
+    virtual io_result recv(void* buf, size_t size, int timeout_ms = -1) const = 0;
+    virtual io_result send_nb(const void* buf, size_t size) const noexcept = 0;
+    virtual io_result send_nb(std::string_view msg) const noexcept = 0;
+    virtual io_result send(const void* buf, size_t size) const = 0;
+    virtual io_result send(std::string_view msg) const = 0;
 
   protected:
     io_socket_concept() noexcept = default;
@@ -350,7 +409,7 @@ class io_socket_model : virtual public io_socket_concept
         return *this;
     }
 
-    std::pair<std::string, uint16_t> remote_endpoint() const override
+    endpoint remote_endpoint() const override
     {
         struct sockaddr_in addr;
         socklen_t addrlen = sizeof(addr);
@@ -362,85 +421,77 @@ class io_socket_model : virtual public io_socket_concept
         return {addr_s, ntohs(addr.sin_port)};
     }
 
-    std::error_code recv_nb(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept override
+    io_result recv_nb(void* buf, size_t size) const noexcept override
     {
-        auto n = read_fn_(io_handle(), buf, size);
-        if (nrecv) {
-            *nrecv = n;
+        return handle_error(read_fn_(io_handle(), buf, size));
+    }
+
+  private:
+    io_result recv_(void* buf, size_t size, int timeout_ms = -1, bool some = false) const
+    {
+        using namespace std::chrono;
+        ssize_t wants = size;
+        int remains = timeout_ms;
+        char* p = (char*)buf;
+        while (wants > 0) {
+            auto start = steady_clock::now();
+            if (!wait_readable(remains)) {
+                return io_result(ETIMEDOUT);
+            }
+            auto ret = recv_nb(p, wants);
+            if ((!ret && !ret.would_block()) || (some && ret && ret.nbytes() > 0)) {
+                return ret;
+            }
+            assert((size_t)wants >= ret.nbytes());
+            wants -= ret.nbytes();
+            p += ret.nbytes();
+            auto elapsed = duration_cast<milliseconds>(steady_clock::now() - start).count();
+            remains = (timeout_ms < 0) ? -1 : (int)std::max(remains - elapsed, 0L);
+        }
+
+        errno = 0;
+        return handle_error(p - (char*)buf);
+    }
+
+  public:
+    io_result recv_some(void* buf, size_t size, int timeout_ms = -1) const override
+    {
+        return recv_(buf, size, timeout_ms, true);
+    }
+
+    io_result recv(void* buf, size_t size, int timeout_ms = -1) const override
+    {
+        return recv_(buf, size, timeout_ms, false);
+    }
+
+    io_result send_nb(const void* buf, size_t size) const noexcept override
+    {
+        auto n = write_fn_(io_handle(), buf, size);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            errno = ENOBUFS;
         }
         return handle_error(n);
     }
 
-    std::error_code recv_some(void* buf, size_t size, int timeout_ms,
-                              size_t* nrecv = nullptr) const noexcept override
+    io_result send_nb(std::string_view msg) const noexcept override
     {
-        if (!wait_readable(timeout_ms)) {
-            return std::error_code(ETIMEDOUT, std::generic_category());
-        }
-        return recv_nb(buf, size, nrecv);
+        return send_nb(msg.data(), msg.size());
     }
 
-    std::error_code recv_some(void* buf, size_t size,
-                              size_t* nrecv = nullptr) const noexcept override
+    io_result send(const void* buf, size_t size) const override
     {
-        return recv_some(buf, size, -1, nrecv);
-    }
-
-    std::error_code recv(void* buf, size_t size, int timeout_ms,
-                         size_t* nrecv = nullptr) const noexcept override
-    {
-        using namespace std::chrono;
-
-        size_t nbytes = 0;
-        size_t wants = size;
-        int remains = timeout_ms;
-        std::error_code ec;
-        char* p = (char*)buf;
-        while (wants > 0) {
-            auto t1 = steady_clock::now();
-            ec = recv_some(p, wants, remains, &nbytes);
-            auto t2 = steady_clock::now();
-            if (ec) {
-                break;
+        while (true) {
+            auto ret = send_nb(buf, size);
+            if (ret || !ret.would_block()) {
+                return ret;
             }
-            assert(wants >= nbytes);
-            wants -= nbytes;
-            p += nbytes;
-            auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
-            remains = (timeout_ms < 0) ? -1 : (int)std::max(remains - elapsed, 0L);
-        }
-
-        if (nrecv) {
-            *nrecv = p - (char*)buf;
-        }
-        return ec;
-    }
-
-    std::error_code recv(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept override
-    {
-        return recv(buf, size, -1, nrecv);
-    }
-
-    std::error_code send(const void* buf, size_t size,
-                         size_t* nsent = nullptr) const noexcept override
-    {
-    again:
-        auto n = write_fn_(io_handle(), buf, size);
-        if (nsent) {
-            *nsent = n;
-        }
-        // return handle_error(n);
-        auto ec = handle_error(n);
-        if (ec.value() == EAGAIN || ec.value() == EWOULDBLOCK || ec.value() == ENOBUFS) {
             wait_writable();
-            goto again;
         }
-        return ec;
     }
 
-    std::error_code send(std::string_view msg, size_t* nsent = nullptr) const noexcept override
+    io_result send(std::string_view msg) const override
     {
-        return send(msg.data(), msg.size(), nsent);
+        return send(msg.data(), msg.size());
     }
 
   protected:
@@ -456,16 +507,15 @@ class io_socket_model : virtual public io_socket_concept
 
     virtual Handle io_handle() const noexcept = 0;
 
-    virtual std::error_code handle_error(ssize_t nbytes) const noexcept
+    virtual io_result handle_error(ssize_t nbytes) const noexcept
     {
         if (nbytes > 0) {
-            return std::error_code();
+            return io_result(0, nbytes);
         }
         if (nbytes == 0) {
-            return std::error_code(ENOENT, std::generic_category());
+            return io_result(ENOENT);
         }
-
-        return std::error_code(errno, std::generic_category());
+        return io_result(errno);
     }
 };
 
@@ -478,8 +528,6 @@ class tcp_socket : public io_socket_model<int>
     tcp_socket(tcp_socket&& rhs) noexcept
         : socket_base(std::move(rhs))
         , io_socket_model<int>(std::move(rhs))
-    //, io_socket_model<int>(std::exchange(rhs.read_fn_, nullptr),
-    //                       std::exchange(rhs.write_fn_, nullptr))
     {
     }
     tcp_socket& operator=(tcp_socket&& rhs) noexcept
@@ -487,8 +535,6 @@ class tcp_socket : public io_socket_model<int>
         if (this != &rhs) {
             socket_base::operator=(std::move(rhs));
             io_socket_model<int>::operator=(std::move(rhs));
-            // read_fn_ = std::exchange(rhs.read_fn_, nullptr);
-            // write_fn_ = std::exchange(rhs.write_fn_, nullptr);
         }
         return *this;
     }
@@ -499,7 +545,7 @@ class tcp_socket : public io_socket_model<int>
     {
     }
 
-    tcp_socket(int fd) noexcept
+    explicit tcp_socket(int fd) noexcept
         : tcp_socket()
     {
         raw_fd_ = fd;
@@ -523,40 +569,38 @@ class io_socket
     io_socket() = default;
 
     template <typename Handle>
-    io_socket(std::unique_ptr<detail::io_socket_model<Handle>>& new_sock)
+    explicit io_socket(std::unique_ptr<detail::io_socket_model<Handle>>& new_sock)
         : impl_(std::move(new_sock))
     {
     }
 
-    std::error_code recv_nb(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept
+    io_result recv_nb(void* buf, size_t size) const noexcept
     {
-        return impl_->recv_nb(buf, size, nrecv);
+        return impl_->recv_nb(buf, size);
     }
-    std::error_code recv_some(void* buf, size_t size, int timeout_ms,
-                              size_t* nrecv = nullptr) const noexcept
+    io_result recv_some(void* buf, size_t size, int timeout_ms = -1) const
     {
-        return impl_->recv_some(buf, size, timeout_ms, nrecv);
+        return impl_->recv_some(buf, size, timeout_ms);
     }
-    std::error_code recv_some(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept
+    io_result recv(void* buf, size_t size, int timeout_ms = -1) const
     {
-        return impl_->recv_some(buf, size, nrecv);
+        return impl_->recv(buf, size, timeout_ms);
     }
-    std::error_code recv(void* buf, size_t size, int timeout_ms,
-                         size_t* nrecv = nullptr) const noexcept
+    io_result send_nb(const void* buf, size_t size) const noexcept
     {
-        return impl_->recv(buf, size, timeout_ms, nrecv);
+        return impl_->send_nb(buf, size);
     }
-    std::error_code recv(void* buf, size_t size, size_t* nrecv = nullptr) const noexcept
+    io_result send_nb(std::string_view msg) const noexcept
     {
-        return impl_->recv(buf, size, nrecv);
+        return impl_->send_nb(msg);
     }
-    std::error_code send(const void* buf, size_t size, size_t* nsent = nullptr) const noexcept
+    io_result send(const void* buf, size_t size) const
     {
-        return impl_->send(buf, size, nsent);
+        return impl_->send(buf, size);
     }
-    std::error_code send(std::string_view msg, size_t* nsent = nullptr) const noexcept
+    io_result send(std::string_view msg) const
     {
-        return impl_->send(msg, nsent);
+        return impl_->send(msg);
     }
 
     void close() noexcept
@@ -595,11 +639,11 @@ class io_socket
     {
         impl_->settcpopt(tcp_optname, val);
     }
-    std::pair<std::string, uint16_t> local_endpoint() const
+    endpoint local_endpoint() const
     {
         return impl_->local_endpoint();
     }
-    std::pair<std::string, uint16_t> remote_endpoint() const
+    endpoint remote_endpoint() const
     {
         return impl_->remote_endpoint();
     }
@@ -627,7 +671,7 @@ class connector : virtual public detail::io_socket_concept
     }
 
     virtual void connect(int timeout_ms = -1) = 0;
-    virtual bool connect_nb() = 0;
+    virtual io_result connect_nb() = 0;
 
   protected:
     connector() noexcept = default;
@@ -691,12 +735,11 @@ class tcp_client
     }
 
     // non-blocking connect
-    bool connect_nb() override
+    io_result connect_nb() override
     {
         switch (conn_state_) {
         case state::unresolved: {
-            int err = connect_();
-            if (err != 0 && err != EINPROGRESS) {
+            if (int err = connect_(); (err != 0 && err != EINPROGRESS)) {
                 THROW_SYSERR(err, "connect");
             }
             conn_state_ = state::connecting;
@@ -705,7 +748,7 @@ class tcp_client
         case state::connecting: {
             try {
                 if (!is_writable()) {
-                    return false;
+                    return io_result(ENOBUFS);
                 }
                 check_last_error();
                 conn_state_ = state::connected;
@@ -716,14 +759,14 @@ class tcp_client
             [[fallthrough]];
         }
         default:
-            return true;
+            return io_result();
         }
     }
 
   private:
     std::string peer_;
     uint16_t port_;
-    enum state
+    enum class state
     {
         unresolved = 0,
         unconnected,
@@ -765,10 +808,15 @@ class tcp_server : public acceptor
   public:
     tcp_server(std::string_view addr, uint16_t port, int backlog = 1024)
     {
-        raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-        setsockopt(SO_REUSEADDR, 1);
-        bind(addr, port);
-        SYSCALL(::listen, handle(), backlog);
+        try {
+            raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+            setsockopt(SO_REUSEADDR, 1);
+            bind(addr, port);
+            SYSCALL(::listen, handle(), backlog);
+        } catch (...) {
+            close();
+            throw;
+        }
     }
 
     explicit tcp_server(uint16_t port, int backlog = 1024)
@@ -1103,8 +1151,6 @@ class tls_socket
     tls_socket(tls_socket&& rhs) noexcept
         : socket_base(std::move(rhs))
         , io_socket_model<SSL*>(std::move(rhs))
-        //, io_socket_model<SSL*>(std::exchange(rhs.read_fn_, nullptr),
-        //                        std::exchange(rhs.write_fn_, nullptr))
         , secure_socket_base(std::move(rhs.ctx_), std::move(rhs.ssl_))
         , is_server_(::SSL_CTX_get_ssl_method(ctx_.get()) == ::TLS_server_method())
         , handshake_fn_(is_server_ ? ::SSL_accept : ::SSL_connect)
@@ -1115,10 +1161,7 @@ class tls_socket
         if (this != &rhs) {
             socket_base::operator=(std::move(rhs));
             io_socket_model<SSL*>::operator=(std::move(rhs));
-            // read_fn_ = std::exchange(rhs.read_fn_, nullptr);
-            // write_fn_ = std::exchange(rhs.write_fn_, nullptr);
-            ctx_ = std::move(rhs.ctx_);
-            ssl_ = std::move(rhs.ssl_);
+            secure_socket_base::operator=(std::move(rhs));
             is_server_ = rhs.is_server_;
             handshake_fn_ = std::exchange(rhs.handshake_fn_, nullptr);
         }
@@ -1148,10 +1191,9 @@ class tls_socket
         return ssl_.get();
     }
 
-    std::error_code handle_error(ssize_t nbytes) const noexcept override
+    io_result handle_error(ssize_t nbytes) const noexcept override
     {
-        return (nbytes > 0) ? std::error_code()
-                            : std::error_code(ssl_error_code(nbytes), std::generic_category());
+        return (nbytes > 0) ? io_result(0, nbytes) : io_result(ssl_error_code(nbytes));
     }
 
     // blocking handshake
@@ -1160,15 +1202,16 @@ class tls_socket
         using namespace std::chrono;
         int remains = timeout_ms;
         while (remains != 0) {
-            auto t1 = steady_clock::now();
-            if (handshake_nb_()) {
+            auto start = steady_clock::now();
+            auto err = handshake_nb_();
+            if (err == 0) {
                 return;
-            }
-            if (!socket_base::wait_readable(remains)) {
+            } else if (err == EAGAIN && !socket_base::wait_readable(remains)) {
+                break;
+            } else if (err == ENOBUFS && !socket_base::wait_writable(remains)) {
                 break;
             }
-            auto t2 = steady_clock::now();
-            auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
+            auto elapsed = duration_cast<milliseconds>(steady_clock::now() - start).count();
             remains = (timeout_ms < 0) ? -1 : (int)std::max(timeout_ms - elapsed, 0L);
         }
 
@@ -1176,24 +1219,20 @@ class tls_socket
     }
 
     // non-blocking handshake
-    bool handshake_nb_() const
+    int handshake_nb_() const
     {
-    again:
         auto ret = handshake_fn_(ssl_.get());
         if (ret >= 1) {
             print_cipher();
-            return true;
+            return 0;
         }
 
         int err = ssl_error_code(ret);
         assert(err != 0);
-        if (err == ENOBUFS) {
-            wait_writable();
-            goto again;
+        if (err == EAGAIN || err == ENOBUFS) {
+            return err;
         }
-        if (err == EAGAIN) {
-            return false;
-        }
+
         const auto* fname = is_server_ ? "SSL_accept" : "SSL_connect";
         if (err == EPROTO) {
             THROW_SSLERR(fname);
@@ -1267,11 +1306,10 @@ class tls_client
     void connect(int timeout_ms = -1) override
     {
         using namespace std::chrono;
-        auto t1 = steady_clock::now();
+        auto start = steady_clock::now();
         tcp_.connect(timeout_ms);
-        auto t2 = steady_clock::now();
         conn_state_ = state::connected;
-        auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
+        auto elapsed = duration_cast<milliseconds>(steady_clock::now() - start).count();
         int remains = (timeout_ms < 0) ? -1 : (int)std::max(timeout_ms - elapsed, 0L);
         try {
             handshake_(remains);
@@ -1283,20 +1321,20 @@ class tls_client
         }
     }
 
-    bool connect_nb() override
+    io_result connect_nb() override
     {
         switch (conn_state_) {
         case state::unconnected: {
-            if (!tcp_.connect_nb()) {
-                return false;
+            if (auto ret = tcp_.connect_nb(); !ret) {
+                return ret;
             }
             conn_state_ = state::connected;
             [[fallthrough]];
         }
         case state::connected: {
             try {
-                if (!handshake_nb_()) {
-                    return false;
+                if (auto err = handshake_nb_(); err != 0) {
+                    return io_result(err);
                 }
                 conn_state_ = state::handshaked;
             } catch (...) {
@@ -1307,13 +1345,13 @@ class tls_client
             [[fallthrough]];
         }
         default:
-            return true;
+            return io_result();
         }
     }
 
   private:
     tcp_client tcp_;
-    enum state
+    enum class state
     {
         unconnected = 0,
         connected,
@@ -1352,16 +1390,13 @@ class tls_server
     io_socket accept(int timeout_ms = -1) override
     {
         using namespace std::chrono;
-        auto t1 = steady_clock::now();
+        auto start = steady_clock::now();
         auto new_tcp = tcp_.accept(timeout_ms);
-        auto t2 = steady_clock::now();
-        auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
+        auto elapsed = duration_cast<milliseconds>(steady_clock::now() - start).count();
         int remains = (timeout_ms < 0) ? -1 : (int)std::max(timeout_ms - elapsed, 0L);
         auto new_ssl = ctx_.new_ssl(new_tcp);
         auto new_tls = std::make_unique<detail::tls_socket>(detail::tls_socket(std::move(new_ssl)));
         new_tls->handshake_(remains);
-        // std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast(
-        //     static_cast<detail::io_socket_model<SSL*>*>(new_tls.release()));
         std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast = std::move(new_tls);
         return io_socket(new_tls_cast);
     }
@@ -1385,8 +1420,6 @@ class tls_server
                     return io_socket();
                 }
                 accept_state_ = state::waiting;
-                // std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast(
-                //     static_cast<detail::io_socket_model<SSL*>*>(new_tls_.release()));
                 std::unique_ptr<detail::io_socket_model<SSL*>> new_tls_cast = std::move(new_tls_);
                 return io_socket(new_tls_cast);
             } catch (...) {
@@ -1405,13 +1438,13 @@ class tls_server
   private:
     tcp_server tcp_;
     std::unique_ptr<detail::tls_socket> new_tls_ = nullptr;
-    enum state
+    enum class state
     {
         waiting = 0,
         accepting,
     } accept_state_{state::waiting};
 };
-#endif
+#endif  // SOCKET_USE_OPENSSL
 
 #undef THROW_SSLERR
 #undef SYSCALL
