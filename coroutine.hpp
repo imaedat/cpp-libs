@@ -1,14 +1,17 @@
 #ifndef COROUTINE_HPP_
 #define COROUTINE_HPP_
 
-#include <pthread.h>
-#include <sys/mman.h>
 #ifdef COROUTINE_USE_SETJMP
+#undef _FORTIFY_SOURCE
+#define _FORTIFY_SOURCE 0
 #include <setjmp.h>
 #include <signal.h>
 #else
 #include <ucontext.h>
 #endif
+
+#include <pthread.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <cassert>
