@@ -47,16 +47,28 @@ class coroutine_env
     class yielder
     {
       public:
+        /* yield function */
         co_arg_type operator()(co_gen_type&& g = {}) const
         {
             assert_context();
-            return ctx_->env_->yield(ctx_, std::forward<co_gen_type>(g));
+            ctx_->env_->last_value_ = std::forward<co_gen_type>(g);
+#ifdef COROUTINE_USE_SETJMP
+            if (::setjmp(ctx_->uctx_) == 0) {
+                ::longjmp(*ctx_->env_->uctx_, 1);
+            }
+#else
+            if (::swapcontext(&ctx_->uctx_, ctx_->env_->uctx_) < 0) {
+                throw std::system_error(errno, std::generic_category(), "coroutine: swapcontext");
+            }
+#endif
+            return std::move(ctx_->value_);
         }
 
         void exit(co_gen_type&& g = {}) const
         {
             assert_context();
-            ctx_->env_->exit(ctx_, std::forward<co_gen_type>(g));
+            ctx_->finished_ = true;
+            (*this)(std::forward<co_gen_type>(g));
         }
 
       private:
@@ -78,7 +90,7 @@ class coroutine_env
         }
 
         friend class context;
-    };
+    };  // yielder
 
     using coro_without_init = std::function<void(const yielder&)>;
     using coro_with_init = std::function<void(const yielder&, co_arg_type&&)>;
@@ -109,14 +121,14 @@ class coroutine_env
         {
 #ifndef COROUTINE_USE_SETJMP
             if (::getcontext(&uctx_) < 0) {
-                throw std::system_error(errno, std::generic_category(), "coroutine: getcontext");
+                throw std::system_error(errno, std::generic_category(), "context: getcontext");
             }
 #endif
 
             size_t pagesz = ::sysconf(_SC_PAGE_SIZE);
             stack_size_ = (stack_size_ + pagesz - 1) & ~(pagesz - 1);  // align
             if (auto err = ::posix_memalign((void**)&stack_, pagesz, pagesz + stack_size_)) {
-                throw std::system_error(err, std::generic_category(), "coroutine: posix_memalign");
+                throw std::system_error(err, std::generic_category(), "context: posix_memalign");
             }
             ::mprotect(stack_, pagesz, PROT_NONE);  // guard page
 
@@ -158,7 +170,6 @@ class coroutine_env
             } catch (...) {
                 ctx->exception_ = std::current_exception();
             }
-
             ctx->finished_ = true;
         }
     };  // context
@@ -184,7 +195,38 @@ class coroutine_env
             if (!ctx_->env_ || ::memcmp(ctx_->env_, MAGIC, sizeof(MAGIC)) != 0) {
                 throw std::invalid_argument("coroutine: env expired");
             }
-            return ctx_->env_->resume(ctx_.get(), std::forward<co_arg_type>(a));
+
+            if (ctx_->finished_) {
+                assert(!ctx_->finished_);
+                return std::nullopt;
+            }
+
+            ctx_->value_ = std::forward<co_arg_type>(a);
+#ifdef COROUTINE_USE_SETJMP
+            if (::setjmp(*ctx_->env_->uctx_) == 0) {
+                ::longjmp(ctx_->uctx_, 1);
+            }
+#else
+            if (::swapcontext(ctx_->env_->uctx_, &ctx_->uctx_) < 0) {
+                throw std::system_error(errno, std::generic_category(), "coroutine: swapcontext");
+            }
+#endif
+
+            if (ctx_->exception_) {
+                auto ep = std::move(ctx_->exception_);
+                ctx_->exception_ = nullptr;
+                std::rethrow_exception(ep);
+            }
+
+            if (ctx_->env_->last_value_) {
+                // on yield w/ value
+                auto val = std::move(*ctx_->env_->last_value_);
+                ctx_->env_->last_value_ = std::nullopt;
+                return val;
+            } else {
+                // on yield w/o value, or on return
+                return std::nullopt;
+            }
         }
 
       private:
@@ -208,7 +250,6 @@ class coroutine_env
 #else
     ucontext_t* uctx_ = nullptr;  // move safety
 #endif
-    context* current_ = nullptr;
     co_gen_type last_value_;
 
   public:
@@ -229,7 +270,6 @@ class coroutine_env
     coroutine_env& operator=(const coroutine_env&) = delete;
     coroutine_env(coroutine_env&& rhs) noexcept
         : uctx_(std::exchange(rhs.uctx_, nullptr))
-        , current_(std::exchange(rhs.current_, nullptr))
         , last_value_(std::move(rhs.last_value_))
     {
         ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
@@ -241,7 +281,6 @@ class coroutine_env
             ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
             ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
             uctx_ = std::exchange(rhs.uctx_, nullptr);
-            current_ = std::exchange(rhs.current_, nullptr);
             last_value_ = std::move(rhs.last_value_);
         }
         return *this;
@@ -312,73 +351,11 @@ class coroutine_env
         if (!ctx->env_ || ::memcmp(ctx->env_, MAGIC, sizeof(MAGIC)) != 0) {
             throw std::invalid_argument("coroutine: env expired");
         }
-        ctx->env_->exit(ctx);
+
+        ctx->finished_ = true;
+        ::longjmp(*ctx->env_->uctx_, 1);
     }
 #endif
-
-    co_gen_type resume(context* ctx, co_arg_type&& r = {})
-    {
-        assert(!current_);
-        if (ctx->finished_) {
-            assert(!ctx->finished_);
-            return std::nullopt;
-        }
-
-        ctx->value_ = std::move(r);
-        current_ = ctx;
-#ifdef COROUTINE_USE_SETJMP
-        if (::setjmp(*uctx_) == 0) {
-            ::longjmp(ctx->uctx_, 1);
-        }
-#else
-        if (::swapcontext(uctx_, &current_->uctx_) < 0) {
-            throw std::system_error(errno, std::generic_category(), "coroutine_env: swapcontext");
-        }
-#endif
-
-        current_ = nullptr;
-        if (ctx->exception_) {
-            auto ep = std::move(ctx->exception_);
-            ctx->exception_ = nullptr;
-            std::rethrow_exception(ep);
-        }
-
-        if (last_value_) {
-            // on yield w/ value
-            auto val = std::move(*last_value_);
-            last_value_ = std::nullopt;
-            return val;
-        } else {
-            // on return, or on yield w/o value
-            return std::nullopt;
-        }
-    }
-
-    co_arg_type yield(context* ctx, co_gen_type&& g = {})
-    {
-        assert(current_);
-        assert(current_->env_->uctx_ == uctx_);
-
-        last_value_ = std::forward<co_gen_type>(g);
-#ifdef COROUTINE_USE_SETJMP
-        if (::setjmp(ctx->uctx_) == 0) {
-            ::longjmp(*uctx_, 1);
-        }
-#else
-        if (::swapcontext(&current_->uctx_, uctx_) < 0) {
-            throw std::system_error(errno, std::generic_category(), "coroutine_env: swapcontext");
-        }
-#endif
-
-        return std::move(ctx->value_);
-    }
-
-    void exit(context* ctx, co_gen_type&& g = {})
-    {
-        assert(current_);
-        current_->finished_ = true;
-        (void)yield(ctx, std::forward<co_gen_type>(g));
-    }
 };
 
 using coro_env = coroutine_env<detail::co_null_type, detail::co_null_type>;
