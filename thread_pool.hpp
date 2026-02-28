@@ -91,9 +91,11 @@ class thread_pool
         : max_workers_(std::thread::hardware_concurrency() != 0
                            ? std::thread::hardware_concurrency() * 2
                            : MAX_THREADS)
+        , initial_workers_(n)
         , running_(true)
         , idle_workers_(n)
         , outstanding_tasks_(0)
+        , pending_shrinks_(0)
     {
         assert(n > 0);
         for (size_t i = 0; i < n; ++i) {
@@ -165,6 +167,7 @@ class thread_pool
 
   private:
     const size_t max_workers_;
+    const size_t initial_workers_;
     std::condition_variable cv_;
     std::mutex mtx_;
     bool running_;
@@ -172,6 +175,7 @@ class thread_pool
     std::deque<std::variant<task, shrink>> taskq_;
     size_t idle_workers_;
     size_t outstanding_tasks_;
+    size_t pending_shrinks_;
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
     std::condition_variable cv_caller_;
 #endif
@@ -207,7 +211,10 @@ class thread_pool
 
             } else {
                 assert(std::holds_alternative<shrink>(cmd));
-                workers_.remove_if([](const auto& w) -> bool { return w.terminated; });
+                auto before = workers_.size();
+                workers_.remove_if([&](const auto& w) -> bool { return w.terminated; });
+                assert(pending_shrinks_ >= before - workers_.size());
+                pending_shrinks_ -= (before - workers_.size());
             }
 
             ++idle_workers_;
@@ -222,7 +229,7 @@ class thread_pool
     void grow_worker()
     {
 #ifdef THREAD_POOL_ENABLE_DYNAMIC_RESIZE
-        if (idle_workers_ == 0 && taskq_.size() > DEFAULT_THREADS &&
+        if (idle_workers_ == 0 && taskq_.size() > workers_.size() &&
             workers_.size() < max_workers_) {
             workers_.emplace_back([this] { executor(); });
             ++idle_workers_;
@@ -246,13 +253,15 @@ class thread_pool
             return wait_result::wr_break;
         }
 
-        if (workers_.size() == DEFAULT_THREADS) {
+        assert(workers_.size() > pending_shrinks_);
+        if (workers_.size() - pending_shrinks_ == initial_workers_) {
             return wait_result::wr_continue;
         }
 
         assert(idle_workers_ > 0);
         --idle_workers_;
         taskq_.emplace_back(shrink{});
+        ++pending_shrinks_;
         return wait_result::wr_return;
 
 #else
