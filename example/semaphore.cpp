@@ -1,3 +1,4 @@
+// #define WAIT_GROUP_WITH_SEMAPHORE
 #include "semaphore.hpp"
 
 #include <unistd.h>
