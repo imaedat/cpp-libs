@@ -37,6 +37,8 @@ class pipe
     pipe& operator=(pipe&& rhs) noexcept
     {
         if (this != &rhs) {
+            close_(fds_[0]);
+            close_(fds_[1]);
             fds_[0] = std::exchange(rhs.fds_[0], -1);
             fds_[1] = std::exchange(rhs.fds_[1], -1);
         }
