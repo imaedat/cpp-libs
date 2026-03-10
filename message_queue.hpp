@@ -46,6 +46,7 @@ class message_queue
     message_queue& operator=(message_queue&& rhs) noexcept
     {
         if (this != &rhs) {
+            close_();
             eventfd_ = std::exchange(rhs.eventfd_, -1);
             mq_ = std::move(rhs.mq_);
             queue_mtx_ = std::move(rhs.queue_mtx_);
@@ -58,10 +59,7 @@ class message_queue
 
     ~message_queue() noexcept
     {
-        if (eventfd_ >= 0) {
-            ::close(eventfd_);
-            eventfd_ = -1;
-        }
+        close_();
     }
 
     int poll_handle() const noexcept
@@ -72,7 +70,7 @@ class message_queue
     template <typename U, typename = std::enable_if_t<std::is_same_v<T, std::decay_t<U>>>>
     void push(U&& msg)
     {
-        std::lock_guard<qmtx_type> lk(*queue_mtx_);
+        std::lock_guard lk(*queue_mtx_);
         mq_.push(std::forward<T>(msg));
         (void)::eventfd_write(eventfd_, 1);
     }
@@ -80,7 +78,7 @@ class message_queue
     T pop()
     {
 #ifdef MESSAGE_QUEUE_MULTIPLE_READERS
-        std::lock_guard<rmtx_type> lk(*reader_mtx_);
+        std::lock_guard lk(*reader_mtx_);
 #endif
 
         return pop_();
@@ -92,7 +90,7 @@ class message_queue
 
 #ifdef MESSAGE_QUEUE_MULTIPLE_READERS
         auto t1 = steady_clock::now();
-        std::unique_lock<rmtx_type> lk(*reader_mtx_, std::defer_lock);
+        std::unique_lock lk(*reader_mtx_, std::defer_lock);
         if (!lk.try_lock_for(milliseconds(wait_ms))) {
             return std::nullopt;
         }
@@ -135,11 +133,19 @@ class message_queue
         eventfd_t value;
         (void)::eventfd_read(eventfd_, &value);
 
-        std::lock_guard<qmtx_type> lk(*queue_mtx_);
+        std::lock_guard lk(*queue_mtx_);
         assert(!mq_.empty());
         T msg = std::move(mq_.front());
         mq_.pop();
         return msg;
+    }
+
+    void close_()
+    {
+        if (eventfd_ >= 0) {
+            ::close(eventfd_);
+            eventfd_ = -1;
+        }
     }
 };
 

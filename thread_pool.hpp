@@ -15,13 +15,18 @@
 #include <type_traits>
 #include <variant>
 
+#ifndef THREAD_POOL_IDLE_KEEP_ALIVE_SEC
+#define THREAD_POOL_IDLE_KEEP_ALIVE_SEC 60
+#endif
+
 namespace tbd {
 
 class thread_pool
 {
     inline static constexpr size_t DEFAULT_THREADS = 8;
-    inline static constexpr size_t MAX_THREADS = 64;
-    inline static constexpr auto IDLE_KEEP_ALIVE = std::chrono::seconds(60);
+    inline static constexpr size_t MAX_THREADS = 16;
+    inline static constexpr auto IDLE_KEEP_ALIVE =
+        std::chrono::seconds(THREAD_POOL_IDLE_KEEP_ALIVE_SEC);
 
     class task
     {
@@ -64,7 +69,7 @@ class thread_pool
 
     struct worker
     {
-        std::atomic<bool> terminated;
+        std::atomic<bool> terminated{false};
         std::thread thr;
 
         template <typename F>
@@ -72,7 +77,7 @@ class thread_pool
             : terminated(false)
             , thr(std::thread([this, f = std::forward<F>(f)] {
                 f();
-                terminated = true;
+                terminated.store(true, std::memory_order_release);
             }))
         {
         }
@@ -88,9 +93,9 @@ class thread_pool
     explicit thread_pool(size_t n = (std::thread::hardware_concurrency() != 0
                                          ? std::thread::hardware_concurrency()
                                          : DEFAULT_THREADS))
-        : max_workers_(std::thread::hardware_concurrency() != 0
-                           ? std::thread::hardware_concurrency() * 2
-                           : MAX_THREADS)
+        : max_workers_(std::max(n, (std::thread::hardware_concurrency() != 0
+                                        ? std::thread::hardware_concurrency() * 2
+                                        : MAX_THREADS)))
         , initial_workers_(n)
         , running_(true)
         , idle_workers_(n)
@@ -113,7 +118,7 @@ class thread_pool
               typename R = std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>>
     std::future<R> submit(F&& fn, Args&&... args)
     {
-        std::unique_lock<decltype(mtx_)> lk(mtx_);
+        std::unique_lock lk(mtx_);
 
         if (!running_) {
             throw std::runtime_error("thread_pool not running");
@@ -135,21 +140,24 @@ class thread_pool
 
     size_t queue_size()
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        std::lock_guard lk(mtx_);
         return taskq_.size();
     }
 
     void stop()
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        std::lock_guard lk(mtx_);
         running_ = false;
         cv_.notify_all();
     }
 
     size_t force_stop()
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
-        auto canceled = taskq_.size();
+        std::lock_guard lk(mtx_);
+        auto canceled = std::count_if(taskq_.begin(), taskq_.end(), [](const auto& c) {
+            return std::holds_alternative<task>(c);
+        });
+        assert(outstanding_tasks_ >= (size_t)canceled);
         outstanding_tasks_ -= canceled;
         taskq_.clear();
         running_ = false;
@@ -160,7 +168,7 @@ class thread_pool
 #ifdef THREAD_POOL_ENABLE_WAIT_ALL
     void wait_all()
     {
-        std::unique_lock<decltype(mtx_)> lk(mtx_);
+        std::unique_lock lk(mtx_);
         cv_caller_.wait(lk, [this] { return outstanding_tasks_ == 0 && taskq_.empty(); });
     }
 #endif
@@ -182,10 +190,10 @@ class thread_pool
 
     void executor() noexcept
     {
-        std::unique_lock<decltype(mtx_)> ul(mtx_);
+        std::unique_lock lk(mtx_);
 
         while (true) {
-            auto wr = wait_task(ul);
+            auto wr = wait_task(lk);
             if (wr == wait_result::wr_continue) {
                 continue;
             }
@@ -201,20 +209,18 @@ class thread_pool
             --idle_workers_;
 
             if (std::holds_alternative<task>(cmd)) {
-                ul.unlock();
+                lk.unlock();
 
                 auto& task = std::get<thread_pool::task>(cmd);
                 task();
 
-                ul.lock();
+                lk.lock();
+                assert(outstanding_tasks_ > 0);
                 --outstanding_tasks_;
 
             } else {
                 assert(std::holds_alternative<shrink>(cmd));
-                auto before = workers_.size();
-                workers_.remove_if([&](const auto& w) -> bool { return w.terminated; });
-                assert(pending_shrinks_ >= before - workers_.size());
-                pending_shrinks_ -= (before - workers_.size());
+                shrink_worker();
             }
 
             ++idle_workers_;
@@ -233,8 +239,21 @@ class thread_pool
             workers_.size() < max_workers_) {
             workers_.emplace_back([this] { executor(); });
             ++idle_workers_;
+            // puts("glow");
         }
 #endif
+    }
+
+    void shrink_worker()
+    {
+        if (pending_shrinks_ > 0) {
+            auto befores = workers_.size();
+            workers_.remove_if([&](const auto& w) -> bool {
+                return w.terminated.load(std::memory_order_acquire);
+            });
+            assert(pending_shrinks_ >= befores - workers_.size());
+            pending_shrinks_ -= (befores - workers_.size());
+        }
     }
 
     enum class wait_result
@@ -244,17 +263,17 @@ class thread_pool
         wr_return,
     };
     template <typename L>
-    wait_result wait_task(L& ul)
+    wait_result wait_task(L& lk)
     {
 #ifdef THREAD_POOL_ENABLE_DYNAMIC_RESIZE
         auto notified =
-            cv_.wait_for(ul, IDLE_KEEP_ALIVE, [this] { return !running_ || !taskq_.empty(); });
+            cv_.wait_for(lk, IDLE_KEEP_ALIVE, [this] { return !running_ || !taskq_.empty(); });
         if (notified) {
             return wait_result::wr_break;
         }
 
         assert(workers_.size() > pending_shrinks_);
-        if (workers_.size() - pending_shrinks_ == initial_workers_) {
+        if (workers_.size() - pending_shrinks_ <= initial_workers_) {
             return wait_result::wr_continue;
         }
 
@@ -262,10 +281,13 @@ class thread_pool
         --idle_workers_;
         taskq_.emplace_back(shrink{});
         ++pending_shrinks_;
+        lk.unlock();
+        cv_.notify_all();
+        // puts("shrink");
         return wait_result::wr_return;
 
 #else
-        cv_.wait(ul, [this] { return !running_ || !taskq_.empty(); });
+        cv_.wait(lk, [this] { return !running_ || !taskq_.empty(); });
         return wait_result::wr_break;
 #endif
     }

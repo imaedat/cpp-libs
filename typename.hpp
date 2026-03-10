@@ -6,10 +6,10 @@
 #include <string>
 #include <typeinfo>
 
-std::string typename_(const char *mangled)
+inline std::string typename_(const char* mangled)
 {
     int status;
-    char *n = abi::__cxa_demangle(mangled, 0, 0, &status);
+    char* n = abi::__cxa_demangle(mangled, 0, 0, &status);
     std::string name(n);
     free(n);
     return name;

@@ -126,7 +126,7 @@ class logger
         }
         void notify() override
         {
-            cv_.notify_one();
+            cv_.notify_all();
         }
 
       private:
@@ -219,7 +219,7 @@ class logger
 
     void set_level(level lv)
     {
-        level_ = lv;
+        level_.store(lv, std::memory_order_relaxed);
     }
 
     void set_level(std::string_view lvs)
@@ -286,10 +286,12 @@ class logger
     template <typename... Args>
     void log(level lv, std::string_view fmt, Args&&... args)
     {
-        if (lv <= level_) {
+        thread_local auto tid = ::syscall(SYS_gettid);
+
+        if (lv <= level_.load(std::memory_order_relaxed)) {
             request req(req_type::log);
             ::clock_gettime(CLOCK_REALTIME, &req.timestamp);
-            req.tid = ::syscall(SYS_gettid);
+            req.tid = tid;
             req.level = lv;
             req.message = format(pass(fmt), pass(args)...);
             if (req.message.empty()) {
@@ -297,7 +299,7 @@ class logger
                 return;
             }
 
-            std::unique_lock<decltype(mtx_)> lk(mtx_);
+            std::unique_lock lk(mtx_);
             if (policy_->can_append(msgq_, lk)) {
                 msgq_.emplace_back(std::move(req));
                 lk.unlock();
@@ -306,8 +308,8 @@ class logger
         }
     }
 
-    template <typename S, typename E = std::enable_if_t<
-                              std::is_convertible_v<std::decay_t<S>, std::string_view>>>
+    template <typename S, std::enable_if_t<std::is_convertible_v<std::decay_t<S>, std::string_view>,
+                                           bool> = true>
     void log(level lv, S s)
     {
         log(lv, "%s", std::string_view(s).data());
@@ -329,7 +331,7 @@ class logger
     std::string format(Args&&... args) const
     {
         static constexpr int INITSZ = 512;
-        char buf[INITSZ] = {0};
+        thread_local char buf[INITSZ] = {0};
         auto result = ::snprintf(buf, INITSZ, args...);
         if (result < 0) {
             return "";
@@ -346,7 +348,7 @@ class logger
 
     void ctl(req_type type, bool force = false)
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        std::lock_guard lk(mtx_);
         if (force) {
             msgq_.emplace_front(request(type));
         } else {
@@ -361,7 +363,7 @@ class logger
     void writer()
     {
         try {
-            std::unique_lock<decltype(mtx_)> lk(mtx_);
+            std::unique_lock lk(mtx_);
             while (true) {
                 cv_.wait(lk, [this] { return !msgq_.empty(); });
 
@@ -406,7 +408,7 @@ class logger
     {
         static constexpr const char* const level_s[] = {"quiet", "fatal", "error", "warn",
                                                         "info",  "debug", "trace"};
-        if (req.level <= level_) {
+        if (req.level <= level_.load(std::memory_order_relaxed)) {
             struct tm tm = {};
             ::localtime_r(&req.timestamp.tv_sec, &tm);
             ::fprintf(fp_, "%04d-%02d-%02d %02d:%02d:%02d.%06ld %s[%d:%d] [%s] %s\n",

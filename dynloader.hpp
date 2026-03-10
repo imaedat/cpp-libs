@@ -65,7 +65,7 @@ class dynloader
         template <typename R, typename... Args>
         R call(Args... args) const
         {
-            return ((R(*)(Args...))fnptr_)(args...);
+            return reinterpret_cast<R (*)(Args...)>(fnptr_)(args...);
         }
 
       private:

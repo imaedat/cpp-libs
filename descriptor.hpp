@@ -18,7 +18,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cassert>
 #include <cerrno>
 #include <system_error>
@@ -32,7 +31,7 @@ namespace tbd {
  * base classes
  */
 namespace detail {
-[[noreturn]] void throw_syserr(int err, std::string_view fn = "")
+[[noreturn]] inline void throw_syserr(int err, std::string_view fn = "")
 {
     throw std::system_error(err, std::generic_category(), fn.data());
 }
@@ -214,7 +213,7 @@ class descriptor
 /****************************************************************************
  * communication channels
  */
-std::pair<descriptor, descriptor> make_pipe()
+inline std::pair<descriptor, descriptor> make_pipe()
 {
     int fds[2];
     if (::pipe(fds) < 0) {
@@ -224,7 +223,7 @@ std::pair<descriptor, descriptor> make_pipe()
     return {descriptor(fds[0]), descriptor(fds[1])};
 }
 
-std::pair<descriptor, descriptor> make_socketpair()
+inline std::pair<descriptor, descriptor> make_socketpair()
 {
     int sv[2];
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
@@ -247,16 +246,36 @@ class fifo : public descriptor
         fd_ = detail::fd_wrapper(::open(path_.c_str(), open_flag));
     }
 
-    fifo(fifo&&) noexcept = default;
-    fifo& operator=(fifo&&) noexcept = default;
+    fifo(fifo&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , path_(std::exchange(rhs.path_, ""))
+    {
+    }
+    fifo& operator=(fifo&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            unlink_();
+            descriptor::operator=(std::move(rhs));
+            path_ = std::exchange(rhs.path_, "");
+        }
+        return *this;
+    }
 
     ~fifo() noexcept
     {
-        ::unlink(path_.c_str());
+        unlink_();
     }
 
   private:
     std::string path_;
+
+    void unlink_()
+    {
+        if (!path_.empty()) {
+            ::unlink(path_.c_str());
+            path_.clear();
+        }
+    }
 };
 
 class mqueue : public descriptor
@@ -282,12 +301,26 @@ class mqueue : public descriptor
         }
     }
 
-    mqueue(mqueue&&) noexcept = default;
-    mqueue& operator=(mqueue&&) noexcept = default;
+    mqueue(mqueue&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , name_(std::exchange(rhs.name_, ""))
+        , attr_(std::exchange(rhs.attr_, {}))
+    {
+    }
+    mqueue& operator=(mqueue&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            unlink_();
+            descriptor::operator=(std::move(rhs));
+            name_ = std::exchange(rhs.name_, "");
+            attr_ = std::exchange(rhs.attr_, {});
+        }
+        return *this;
+    }
 
     ~mqueue() noexcept
     {
-        ::mq_unlink(name_.c_str());
+        unlink_();
     }
 
     size_t maxmsg() const noexcept
@@ -316,11 +349,10 @@ class mqueue : public descriptor
 
     size_t write(const void* buffer, size_t size, unsigned prio) const
     {
-        int nwritten = 0;
-        if ((nwritten = ::mq_send(*fd_, (const char*)buffer, size, prio)) < 0) {
+        if (::mq_send(*fd_, (const char*)buffer, size, prio) < 0) {
             detail::throw_syserr(errno, "mq_send");
         }
-        return (size_t)nwritten;
+        return size;
     }
 
     size_t write(const void* buffer, size_t size) const override
@@ -331,6 +363,14 @@ class mqueue : public descriptor
   private:
     std::string name_;
     struct mq_attr attr_ = {};
+
+    void unlink_()
+    {
+        if (!name_.empty()) {
+            ::mq_unlink(name_.c_str());
+            name_.clear();
+        }
+    }
 };
 
 /****************************************************************************
@@ -544,7 +584,7 @@ class eventfd : public descriptor
 
     uint64_t read() const
     {
-        uint64_t value;
+        uint64_t value = 0;
         descriptor::read(&value, sizeof(value));
         return value;
     }
@@ -588,7 +628,7 @@ class signalfd : public descriptor
 
     int get_last_signal() const
     {
-        struct signalfd_siginfo siginfo;
+        struct signalfd_siginfo siginfo = {};
         read(&siginfo, sizeof(siginfo));
         return siginfo.ssi_signo;
     }
@@ -615,11 +655,11 @@ class timerfd : public descriptor
 
     void settime(long after_ms, bool cyclic = false) const
     {
-        static constexpr long ns_scale = 1000 * 1000 * 1000;
+        static constexpr long long ns_scale = 1000 * 1000 * 1000;
 
         clear();
 
-        auto nsec = after_ms * 1000 * 1000;
+        auto nsec = 1000LL * 1000 * after_ms;
         long sec = 0;
         if (nsec >= ns_scale) {
             sec = nsec / ns_scale;

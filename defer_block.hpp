@@ -2,45 +2,44 @@
 #define DEFER_BLOCK_HPP_
 
 #include <functional>
+#include <tuple>
 #include <type_traits>
 
 namespace tbd {
 
-class defer_block
+template <typename F, typename... Args>
+class [[nodiscard]] defer_block
 {
   public:
-    template <typename F, typename = std::enable_if_t<std::is_invocable_v<F>>>
-    explicit defer_block(F&& fn) noexcept
+    explicit defer_block(F&& fn, Args&&... args)
         : fn_(std::forward<F>(fn))
+        , args_(std::forward<Args>(args)...)
     {
     }
 
     defer_block(const defer_block&) = delete;
     defer_block& operator=(const defer_block&) = delete;
-    defer_block(defer_block&& rhs) noexcept
-        : fn_(std::move(rhs.fn_))
-    {
-    }
-    defer_block& operator=(defer_block&& rhs) noexcept
-    {
-        if (this != &rhs) {
-            fn_ = std::move(rhs.fn_);
-        }
-        return *this;
-    }
+    defer_block(defer_block&&) = delete;
+    defer_block& operator=(defer_block&&) = delete;
 
     ~defer_block() noexcept
     {
         try {
-            fn_();
+            std::apply(
+                [this](auto&&... args) { std::invoke(fn_, std::forward<decltype(args)>(args)...); },
+                args_);
         } catch (...) {
             // ignore
         }
     }
 
   private:
-    std::function<void()> fn_;
+    F fn_;
+    std::tuple<Args...> args_;
 };
+
+template <typename F, typename... Args>
+defer_block(F&&, Args&&...) -> defer_block<std::decay_t<F>, std::decay_t<Args>...>;
 
 }  // namespace tbd
 

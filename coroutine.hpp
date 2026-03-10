@@ -133,18 +133,24 @@ class coroutine_env
             if (auto err = ::posix_memalign((void**)&stack_, pagesz, pagesz + stack_size_)) {
                 throw std::system_error(err, std::generic_category(), "context: posix_memalign");
             }
-            ::mprotect(stack_, pagesz, PROT_NONE);  // guard page
+            if (::mprotect(stack_, pagesz, PROT_NONE) < 0) {  // guard page
+                auto err = errno;
+                ::free(stack_);
+                stack_ = nullptr;
+                throw std::system_error(err, std::generic_category(), "context: mprotect");
+            }
 
 #ifdef COROUTINE_USE_SETJMP
             ss_.ss_sp = stack_ + pagesz;
             ss_.ss_size = stack_size_;
             ss_.ss_flags = 0;
-            ::memset(&uctx_, 0, sizeof(jmp_buf));
 #else
             uctx_.uc_stack.ss_sp = stack_ + pagesz;
             uctx_.uc_stack.ss_size = stack_size_;
             uctx_.uc_link = env_->uctx_;
-            ::makecontext(&uctx_, (void (*)()) & entry, 1, (uintptr_t)this);
+            auto ptr = (uintptr_t)this;
+            ::makecontext(&uctx_, (void (*)()) & entry, 2, (unsigned)(ptr >> 32),
+                          (unsigned)(ptr & 0xffffffffU));
 #endif
         }
 
@@ -155,14 +161,15 @@ class coroutine_env
         ~context() noexcept
         {
             if (stack_) {
-                ::mprotect(stack_, ::sysconf(_SC_PAGE_SIZE), PROT_WRITE);
+                ::mprotect(stack_, ::sysconf(_SC_PAGE_SIZE), PROT_READ | PROT_WRITE);
                 ::free(stack_);
                 stack_ = nullptr;
             }
         }
 
-        static void entry(uintptr_t ptr) noexcept
+        static void entry(unsigned hi, unsigned lo) noexcept
         {
+            auto ptr = ((uintptr_t)hi << 32) | lo;
             auto* ctx = (context*)ptr;
             try {
                 if (auto fn = std::get_if<coro_without_init>(&ctx->fn_)) {
@@ -258,7 +265,7 @@ class coroutine_env
   public:
     coroutine_env()
 #ifdef COROUTINE_USE_SETJMP
-        : uctx_((jmp_buf*)malloc(sizeof(jmp_buf)))
+        : uctx_((jmp_buf*)malloc(sizeof(*uctx_)))
 #else
         : uctx_((ucontext_t*)malloc(sizeof(ucontext_t)))
 #endif
@@ -350,7 +357,8 @@ class coroutine_env
             return;
         }
 
-        context::entry((uintptr_t)ctx);
+        auto ptr = (uintptr_t)ctx;
+        context::entry((unsigned)(ptr >> 32), (unsigned)(ptr & 0xffffffffU));
         if (!ctx->env_ || ::memcmp(ctx->env_, MAGIC, sizeof(MAGIC)) != 0) {
             throw std::invalid_argument("coroutine: env expired");
         }

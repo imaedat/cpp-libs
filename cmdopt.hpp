@@ -54,6 +54,13 @@ class cmdopt
         {
         }
 
+        void reset() noexcept
+        {
+            exists = false;
+            want_value = false;
+            values.clear();
+        }
+
         std::string repr() const
         {
             return short_ ? std::string{'-', short_} : "--" + long_;
@@ -208,6 +215,8 @@ class cmdopt
 
     void parse(int argc, char* argv[])
     {
+        reset();
+
         if (argc >= 1) {
             progname_.assign(std::filesystem::path(argv[0]).filename().c_str());
         }
@@ -279,6 +288,12 @@ class cmdopt
      * privates
      */
   private:
+    void reset() noexcept
+    {
+        std::for_each(options_.begin(), options_.end(), [](auto&& o) { o.reset(); });
+        plain_args_.clear();
+    }
+
     void assert_undefined(char s, std::string_view l) const
     {
         if (!s && l.empty()) {
