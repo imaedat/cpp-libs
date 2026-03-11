@@ -47,6 +47,8 @@ int main(int argc, char* argv[])
         if (argv[1][0] == '1') {
             lim = make_unique<token_bucket>(limit, window);
         } else if (argv[1][0] == '2') {
+            lim = make_unique<gcra>(limit, window);
+        } else if (argv[1][0] == '3') {
             lim = make_unique<sliding_window_log>(limit, window);
         }
     }
@@ -57,22 +59,20 @@ int main(int argc, char* argv[])
     start_ = steady_clock::now();
     while (true) {
         int count = 1 + r(4);
-        [[maybe_unused]] auto waitms = r(300);
-        auto t1 = steady_clock::now();
         bool ok = true;
+        auto t = steady_clock::now();
 #ifdef WAIT_IN_REQUEST
         lim->request(count);
+        auto waitms = 0;
 #else
         std::tie(ok, std::ignore) = lim->try_request(count);
+        auto waitms = r(300);
 #endif
-        auto t2 = steady_clock::now();
         LOG("req=%d, result=%s, time=%ld us\n", count, (ok ? "success" : "denied"),
-            duration_cast<microseconds>(t2 - t1).count());
+            duration_cast<microseconds>(steady_clock::now() - t).count());
         if (ok) {
             total_ += count;
         }
-#ifndef WAIT_IN_REQUEST
         usleep(waitms * 1000);
-#endif
     }
 }
