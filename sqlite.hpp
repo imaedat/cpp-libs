@@ -98,6 +98,7 @@ class sqlite
     sqlite& operator=(sqlite&& rhs) noexcept
     {
         if (this != &rhs) {
+            close();
             db_ = std::exchange(rhs.db_, nullptr);
         }
         return *this;
@@ -110,7 +111,7 @@ class sqlite
 
     void begin(const std::function<void(transaction&)>& fn)
     {
-        transaction txn(*this);
+        transaction txn(this);
 
         try {
             exec("begin;");
@@ -131,6 +132,7 @@ class sqlite
     template <typename... Args>
     int64_t exec(std::string_view sql, Args&&... params) const
     {
+        static_assert(sizeof...(Args) > 0);
         auto stmt = bind_params(sql, std::forward<Args>(params)...);
         auto ec = sqlite3_step(*stmt);
         if (ec != SQLITE_DONE && ec != SQLITE_ROW) {
@@ -261,9 +263,11 @@ class sqlite
 
     static int query_cb(void* user_cb, int ncolumns, char** values, char** names)
     {
-        (void)ncolumns;
-        (void)names;
-        (*(query_cb_t*)user_cb)(ncolumns, values, names);
+        try {
+            (*(query_cb_t*)user_cb)(ncolumns, values, names);
+        } catch (...) {
+            return 1;
+        }
         return 0;
     }
 
@@ -276,14 +280,14 @@ class sqlite
         transaction(const transaction&) = delete;
         transaction& operator=(const transaction&) = delete;
         transaction(transaction&& rhs) noexcept
-            : db_(rhs.db_)
+            : db_(std::exchange(rhs.db_, nullptr))
             , completed_(std::exchange(rhs.completed_, true))
         {
         }
         transaction& operator=(transaction&& rhs) noexcept
         {
             if (this != &rhs) {
-                db_ = std::move(rhs.db_);
+                db_ = std::exchange(rhs.db_, nullptr);
                 completed_ = std::exchange(rhs.completed_, true);
             }
             return *this;
@@ -298,7 +302,7 @@ class sqlite
         int64_t exec(std::string_view sql, Args&&... params) const
         {
             if (!completed_) {
-                return db_.exec(sql, std::forward<Args>(params)...);
+                return db_->exec(sql, std::forward<Args>(params)...);
             }
             return -1;
         }
@@ -306,27 +310,27 @@ class sqlite
         int64_t exec(std::string_view sql) const
         {
             if (!completed_) {
-                return db_.exec(sql);
+                return db_->exec(sql);
             }
             return -1;
         }
 
         int64_t count(std::string_view sql) const
         {
-            return completed_ ? -1 : db_.count(sql);
+            return completed_ ? -1 : db_->count(sql);
         }
 
         void query(std::string_view sql, const query_cb_t& user_cb) const
         {
             if (!completed_) {
-                db_.query(sql, user_cb);
+                db_->query(sql, user_cb);
             }
         }
 
         void commit()
         {
             if (!completed_) {
-                db_.exec("commit;");
+                db_->exec("commit;");
                 completed_ = true;
             }
         }
@@ -335,7 +339,7 @@ class sqlite
         {
             if (!completed_) {
                 try {
-                    db_.exec("rollback;");
+                    db_->exec("rollback;");
                     completed_ = true;
                 } catch (const std::exception& e) {
                     fprintf(stderr, "transaction::rollback failed: %s\n", e.what());
@@ -345,10 +349,10 @@ class sqlite
         }
 
       private:
-        sqlite& db_;
+        sqlite* db_ = nullptr;
         bool completed_;
 
-        explicit transaction(sqlite& db) noexcept
+        explicit transaction(sqlite* db) noexcept
             : db_(db)
             , completed_(false)
         {
@@ -370,7 +374,7 @@ class sqlite
         cursor& operator=(cursor&& rhs) noexcept = default;
         ~cursor() noexcept = default;
 
-        std::optional<const row> next()
+        std::optional<row> next()
         {
             auto ec = sqlite3_step(*stmt_);
 
@@ -384,8 +388,8 @@ class sqlite
             }
 
             auto ncols = sqlite3_data_count(*stmt_);
-            const char* names[ncols];
-            column_types values[ncols];
+            std::vector<const char*> names(ncols);
+            std::vector<column_types> values(ncols);
             for (auto i = 0; i < ncols; ++i) {
                 names[i] = sqlite3_column_name(*stmt_, i);
 
@@ -433,7 +437,8 @@ class sqlite
         std::vector<field> fields_;
         using iterator = typename decltype(fields_)::const_iterator;
 
-        row(size_t ncols, const char** names, const column_types* values)
+        row(size_t ncols, const std::vector<const char*>& names,
+            const std::vector<column_types>& values)
         {
             fields_.reserve(ncols);
             for (size_t i = 0; i < ncols; ++i) {
@@ -514,7 +519,7 @@ class sqlite
         std::string name_;
         field_types value_;
 
-        explicit field(const char* name, const column_types& value)
+        field(const char* name, const column_types& value)
             : name_(name)
         {
             switch (value.index()) {
