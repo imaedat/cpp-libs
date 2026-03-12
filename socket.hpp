@@ -27,7 +27,6 @@
 #include <cassert>
 #include <chrono>
 #include <memory>
-#include <regex>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -37,7 +36,7 @@ namespace tbd {
 
 #define THROW_SYSERR(e, f) throw std::system_error((e), std::generic_category(), (f))
 
-#define SYSCALL(func, ...)                                                                         \
+#define TBD_SYSCALL(func, ...)                                                                     \
     ({                                                                                             \
         int ret = func(__VA_ARGS__);                                                               \
         if (ret < 0) {                                                                             \
@@ -67,11 +66,9 @@ class resolver
      */
     int64_t lookup(std::string_view host) const noexcept
     {
-        static const std::regex re{
-            "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"};
-
-        if (std::regex_match(host.data(), re)) {
-            return inet_addr(host.data());
+        struct in_addr addr = {};
+        if (::inet_pton(AF_INET, host.data(), &addr) > 0) {
+            return addr.s_addr;
         }
 
         auto it = host_addrs_.find(std::string(host));
@@ -146,8 +143,8 @@ class resolver
 
 class endpoint
 {
-    const std::string addr_{};
-    const uint16_t port_ = 0;
+    std::string addr_{};
+    uint16_t port_ = 0;
 
   public:
     endpoint(const std::string& a, uint16_t p)
@@ -174,8 +171,8 @@ class endpoint
 
 class io_result
 {
-    const std::error_code ec_{};
-    const size_t nbytes_ = 0;
+    std::error_code ec_{};
+    size_t nbytes_ = 0;
 
   public:
     explicit io_result(int err = 0, size_t n = 0)
@@ -271,10 +268,10 @@ class socket_base
 
     int set_nonblock(bool set = true) const
     {
-        int old_flags = SYSCALL(::fcntl, handle(), F_GETFL);
+        int old_flags = TBD_SYSCALL(::fcntl, handle(), F_GETFL);
         if ((set && !(old_flags & O_NONBLOCK)) || (!set && (old_flags & O_NONBLOCK))) {
-            SYSCALL(::fcntl, handle(), F_SETFL,
-                    (set ? (old_flags | O_NONBLOCK) : (old_flags & ~O_NONBLOCK)));
+            TBD_SYSCALL(::fcntl, handle(), F_SETFL,
+                        (set ? (old_flags | O_NONBLOCK) : (old_flags & ~O_NONBLOCK)));
         }
         return old_flags;
     }
@@ -285,7 +282,7 @@ class socket_base
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = ipaddr.empty() ? INADDR_ANY : inet_addr(ipaddr.data());
         addr.sin_port = htons(port);
-        SYSCALL(::bind, handle(), (const struct sockaddr*)&addr, sizeof(addr));
+        TBD_SYSCALL(::bind, handle(), (const struct sockaddr*)&addr, sizeof(addr));
     }
 
     void setsockopt(int so_optname, int val) const
@@ -302,8 +299,8 @@ class socket_base
     {
         struct sockaddr_in addr;
         socklen_t addrlen = sizeof(addr);
-        SYSCALL(::getsockname, handle(), (struct sockaddr*)&addr, &addrlen);
-        char addr_s[20] = {0};
+        TBD_SYSCALL(::getsockname, handle(), (struct sockaddr*)&addr, &addrlen);
+        char addr_s[INET_ADDRSTRLEN] = {0};
         if (!::inet_ntop(AF_INET, &addr.sin_addr, addr_s, sizeof(addr_s))) {
             THROW_SYSERR(errno, "inet_ntop");
         }
@@ -338,7 +335,7 @@ class socket_base
   private:
     void setsockopt_(int level, int optname, int val) const
     {
-        SYSCALL(::setsockopt, handle(), level, optname, &val, (socklen_t)sizeof(val));
+        TBD_SYSCALL(::setsockopt, handle(), level, optname, &val, (socklen_t)sizeof(val));
     }
 
     bool poll_(int events, int timeout_ms = 0) const
@@ -347,7 +344,7 @@ class socket_base
         fds.fd = handle();
         fds.events = events;
         fds.revents = 0;
-        int nfds = SYSCALL(::poll, &fds, 1, timeout_ms);
+        int nfds = TBD_SYSCALL(::poll, &fds, 1, timeout_ms);
         if (fds.revents & POLLNVAL) {
             THROW_SYSERR(EINVAL, "poll");
         }
@@ -413,8 +410,8 @@ class io_socket_model : virtual public io_socket_concept
     {
         struct sockaddr_in addr;
         socklen_t addrlen = sizeof(addr);
-        SYSCALL(::getpeername, handle(), (struct sockaddr*)&addr, &addrlen);
-        char addr_s[20] = {0};
+        TBD_SYSCALL(::getpeername, handle(), (struct sockaddr*)&addr, &addrlen);
+        char addr_s[INET_ADDRSTRLEN] = {0};
         if (!::inet_ntop(AF_INET, &addr.sin_addr, addr_s, sizeof(addr_s))) {
             THROW_SYSERR(errno, "inet_ntop");
         }
@@ -480,13 +477,21 @@ class io_socket_model : virtual public io_socket_concept
 
     io_result send(const void* buf, size_t size) const override
     {
-        while (true) {
-            auto ret = send_nb(buf, size);
-            if (ret || !ret.would_block()) {
+        auto* p = (const char*)buf;
+        long remains = size;
+        while (remains > 0) {
+            auto ret = send_nb(p, remains);
+            if (!ret && !ret.would_block()) {
                 return ret;
             }
-            wait_writable();
+            if (ret) {
+                p += ret.nbytes();
+                remains -= ret.nbytes();
+            } else {
+                wait_writable();
+            }
         }
+        return io_result(0, size);
     }
 
     io_result send(std::string_view msg) const override
@@ -719,7 +724,7 @@ class tcp_client
     {
         close();
         conn_state_ = state::unresolved;
-        return (raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0));
+        return (raw_fd_ = TBD_SYSCALL(::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0));
     }
 
     // blocking connect
@@ -794,7 +799,7 @@ class tcp_client
     {
         int err;
         socklen_t len = sizeof(err);
-        SYSCALL(::getsockopt, handle(), SOL_SOCKET, SO_ERROR, &err, &len);
+        TBD_SYSCALL(::getsockopt, handle(), SOL_SOCKET, SO_ERROR, &err, &len);
         if (err > 0) {
             conn_state_ = state::unresolved;
             THROW_SYSERR(err, "connect");
@@ -809,10 +814,10 @@ class tcp_server : public acceptor
     tcp_server(std::string_view addr, uint16_t port, int backlog = 1024)
     {
         try {
-            raw_fd_ = SYSCALL(::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+            raw_fd_ = TBD_SYSCALL(::socket, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
             setsockopt(SO_REUSEADDR, 1);
             bind(addr, port);
-            SYSCALL(::listen, handle(), backlog);
+            TBD_SYSCALL(::listen, handle(), backlog);
         } catch (...) {
             close();
             throw;
@@ -1247,8 +1252,6 @@ class tls_socket
 
     int ssl_error_code(int ret) const noexcept
     {
-        static constexpr int UNEXPECTED_EOF = 294;
-
         switch (::SSL_get_error(ssl_.get(), ret)) {
         case SSL_ERROR_NONE:
             return 0;
@@ -1259,7 +1262,9 @@ class tls_socket
         case SSL_ERROR_ZERO_RETURN:
             return ENOENT;
         case SSL_ERROR_SSL:
-            return (::ERR_GET_REASON(::ERR_get_error()) == UNEXPECTED_EOF) ? ENOENT : EPROTO;
+            return (::ERR_GET_REASON(::ERR_get_error()) == SSL_R_UNEXPECTED_EOF_WHILE_READING)
+                       ? ENOENT
+                       : EPROTO;
         default:
             return errno;
         }
@@ -1270,7 +1275,7 @@ class tls_socket
 #ifdef SOCKET_VERBOSE
         const char* version = ::SSL_get_version(ssl_.get());
         const char* cipher = ::SSL_CIPHER_get_name(::SSL_get_current_cipher(ssl_.get()));
-        printf(" *** [%04ld] %s Handshake: %s, %s ***\n", syscall(SYS_gettid),
+        printf(" *** [%04ld] %s Handshake: %s, %s ***\n", ::syscall(SYS_gettid),
                (is_server_ ? "Server" : "Client"), version, cipher);
 #endif
     }
@@ -1416,7 +1421,7 @@ class tls_server
         }
         case state::accepting: {
             try {
-                if (!new_tls_->handshake_nb_()) {
+                if (new_tls_->handshake_nb_() > 0) {
                     return io_socket();
                 }
                 accept_state_ = state::waiting;
@@ -1447,7 +1452,7 @@ class tls_server
 #endif  // SOCKET_USE_OPENSSL
 
 #undef THROW_SSLERR
-#undef SYSCALL
+#undef TBD_SYSCALL
 #undef THROW_SYSERR
 
 }  // namespace tbd
