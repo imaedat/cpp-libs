@@ -69,7 +69,7 @@ class memory_pool : public detail::memory_pool_base<uint64_t>
 
     void* acquire() override
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        std::lock_guard lk(mtx_);
 
         for (size_t i = 0; i < avail_map_.size(); ++i) {
             if (avail_map_[i]) {
@@ -87,7 +87,7 @@ class memory_pool : public detail::memory_pool_base<uint64_t>
     {
         auto [index, relbit] = index_relbit(ptr);
         if (relbit) {
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             avail_map_[index] |= relbit;
         }
     }

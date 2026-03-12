@@ -181,11 +181,12 @@ class engine
         {
             void* ev;
             int64_t deadline_ms;
+            inline static constexpr std::less<const void*> less;
 
             bool operator<(const timer_event& rhs) const noexcept
             {
                 return (deadline_ms != rhs.deadline_ms) ? (deadline_ms < rhs.deadline_ms)
-                                                        : (ev < rhs.ev);
+                                                        : less(ev, rhs.ev);
             }
         };
 
@@ -355,7 +356,7 @@ class engine
 
     void stop()
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        std::lock_guard lk(mtx_);
         requestq_.emplace_back(event_request{EV_TERM, nullptr, 0});
         notify();
     }
@@ -420,21 +421,21 @@ class engine
   protected:
     void register_event(event* ev, int timeout_ms = 0)
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        std::lock_guard lk(mtx_);
         requestq_.emplace_back(event_request{EV_ADD, ev, timeout_ms});
         notify();
     }
 
     void register_timer(event* ev, int timeout_ms)
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        std::lock_guard lk(mtx_);
         requestq_.emplace_back(event_request{EV_TIM, ev, timeout_ms});
         notify();
     }
 
     void deregister(event* ev)
     {
-        std::lock_guard<decltype(mtx_)> lk(mtx_);
+        std::lock_guard lk(mtx_);
         requestq_.emplace_back(event_request{EV_DEL, ev, 0});
         notify();
     }
@@ -450,7 +451,7 @@ class engine
     bool handle_request()
     {
         bool changed = false;
-        std::unique_lock<decltype(mtx_)> lk(mtx_);
+        std::unique_lock lk(mtx_);
         while (!requestq_.empty()) {
             changed = true;
             auto req = std::move(requestq_.front());
@@ -570,8 +571,11 @@ class engine
         int n = 0;
         std::string log;
         log.reserve(256);
-        auto first_deadline = timerq_.peek()->deadline_ms;
-        while (timerq_.peek()->deadline_ms == first_deadline) {
+        // auto first_deadline = timerq_.peek()->deadline_ms;
+        // while (timerq_.peek()->deadline_ms == first_deadline) {
+        using namespace std::chrono;
+        auto now_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        while (!timerq_.empty() && timerq_.peek()->deadline_ms <= now_ms) {
             auto* ev = (event*)timerq_.pop();
             delete_event(ev);
             ev->task()->top_half(ev);

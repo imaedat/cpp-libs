@@ -125,34 +125,34 @@ class resolver_base
 
         void clear()
         {
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             cache_.clear();
         }
 
         void add_or_replace(std::string_view hostname, uint32_t ipaddr)
         {
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             cache_.insert_or_assign(hostname.data(),
                                     entry{ipaddr, std::chrono::steady_clock::now()});
         }
 
         void add_or_replace(std::string_view hostname, std::string_view ipaddr)
         {
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             cache_.insert_or_assign(hostname.data(), entry{::inet_addr(ipaddr.data()),
                                                            std::chrono::steady_clock::now()});
         }
 
         void remove_by_name(std::string_view hostname)
         {
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             cache_.erase(hostname.data());
         }
 
         void remove_by_addr(std::string_view ipaddr)
         {
             uint32_t addr = ::inet_addr(ipaddr.data());
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             for (auto it = cache_.begin(); it != cache_.end();) {
                 if (it->second.ipaddr == addr) {
                     it = cache_.erase(it);
@@ -164,7 +164,7 @@ class resolver_base
 
         std::optional<uint32_t> find_addr_by_name(std::string_view hostname)
         {
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             auto it = cache_.find(hostname.data());
             if (it == cache_.end()) {
                 return std::nullopt;
@@ -186,7 +186,7 @@ class resolver_base
         std::vector<std::string> find_names_by_addr(uint32_t ipaddr)
         {
             std::vector<std::string> names;
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             for (auto it = cache_.begin(); it != cache_.end();) {
                 if (it->second.ipaddr != ipaddr) {
                     ++it;
@@ -202,7 +202,7 @@ class resolver_base
 
         void set_ttl(int new_ttl)
         {
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             ttl_ = new_ttl;
         }
 

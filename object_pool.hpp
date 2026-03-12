@@ -61,7 +61,7 @@ class object_pool
 
     T* acquire_(long wait_ms)
     {
-        std::unique_lock<decltype(mtx_)> lk(mtx_);
+        std::unique_lock lk(mtx_);
 
         if (pool_.empty()) {
             if (nr_objs_ < max_objs_) {
@@ -89,7 +89,7 @@ class object_pool
     void release(T* o)
     {
         if (o) {
-            std::lock_guard<decltype(mtx_)> lk(mtx_);
+            std::lock_guard lk(mtx_);
             pool_.emplace(o);
             cv_.notify_one();
         }
