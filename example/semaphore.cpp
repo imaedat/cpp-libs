@@ -6,11 +6,13 @@
 #include <thread>
 
 #define THREAD_POOL_ENABLE_WAIT_ALL
+#include "logger.hpp"
 #include "thread_pool.hpp"
-#include "util.h"
 
 using namespace std;
 using namespace tbd;
+
+logger con("semaphore", "/dev/stdout");
 
 void semaphore_sample()
 {
@@ -24,9 +26,9 @@ void semaphore_sample()
         pool.submit([&, i] {
             auto work_us = 1 + random() % (1000 * 1000);
             sem.acquire();
-            LOG("worker-%02u: acquire semaphore, work for %ld us ...\n", i, work_us);
+            con.info("worker-%02u: acquire semaphore, work for %ld us ...", i, work_us);
             usleep(work_us);
-            LOG("worker-%02u: release semaphore, work done\n", i);
+            con.info("worker-%02u: release semaphore, work done", i);
             sem.release();
         });
     }
@@ -77,9 +79,9 @@ void wait_group_sample()
         wg.add();
         pool.submit([i, &wg] {
             auto work_us = 1 + random() % (1000 * 1000);
-            LOG("task-%02u: work for %lu us ...\n", i, work_us);
+            con.info("task-%02u: work for %lu us ...", i, work_us);
             usleep(work_us);
-            LOG("task-%02u: done\n", i);
+            con.info("task-%02u: done", i);
             wg.done();
         });
     }

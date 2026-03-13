@@ -8,12 +8,14 @@
 #include <cstdio>
 
 #define THREAD_POOL_ENABLE_WAIT_ALL
+#include "logger.hpp"
 #include "thread_pool.hpp"
-#include "util.h"
 
 using namespace std;
 using namespace std::chrono;
 using namespace tbd;
+
+logger con("mutex_wrap", "/dev/stdout");
 
 void normal_mutex(thread_pool& pool)
 {
@@ -22,13 +24,13 @@ void normal_mutex(thread_pool& pool)
     {
         for (int i = 0; i < 10; ++i) {
             pool.submit([&, i] {
-                LOG("task-%02d: start\n", i);
+                con.info("task-%02d: start", i);
                 auto ms = random() % 300;
                 str.lock([&](auto& data) {
-                    LOG("task-%02d: acquire resource(%s), work for %lu ms ...\n", i, data.c_str(),
-                        ms);
+                    con.info("task-%02d: acquire resource(%s), work for %lu ms ...", i,
+                             data.c_str(), ms);
                     usleep(ms * 1000);
-                    LOG("task-%02d: finished\n", i);
+                    con.info("task-%02d: finished", i);
                 });
             });
         }
@@ -59,21 +61,21 @@ void readwrite_mutex(thread_pool& pool)
     {
         for (int i = 0; i < 10; ++i) {
             pool.submit([&, i] {
-                LOG("task-%02d: start\n", i);
+                con.info("task-%02d: start", i);
                 auto ms = random() % 800;
                 if (is_writer(i)) {
                     auto s = str.lock();
-                    LOG("task-%02d: acquire write lock(%s), work for %lu ms ...\n", i, s->c_str(),
-                        ms);
+                    con.info("task-%02d: acquire write lock(%s), work for %lu ms ...", i,
+                             s->c_str(), ms);
                     usleep(ms * 1000);
-                    LOG("task-%02d: release write lock\n", i);
+                    con.info("task-%02d: release write lock", i);
                     // s->clear();  // compile ok
                 } else {
                     auto s = str.lock_shared();
-                    LOG("task-%02d: acquire read lock(%s), work for %lu ms ...\n", i, s->c_str(),
-                        ms);
+                    con.info("task-%02d: acquire read lock(%s), work for %lu ms ...", i, s->c_str(),
+                             ms);
                     usleep(ms * 1000);
-                    LOG("task-%02d: release read lock\n", i);
+                    con.info("task-%02d: release read lock", i);
                     // s->clear();  // compile error
                 }
             });

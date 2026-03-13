@@ -15,7 +15,11 @@ int main()
     srandom(time(nullptr));
     char name[32] = {0};
     auto rand = 1 + random() % 10000;
+#if 1
     sprintf(name, "test-%ld.log", rand);
+#else
+    sprintf(name, "/dev/stdout");
+#endif
     logger logger("dummy", name);
     logger.set_level("debug");
 
@@ -53,16 +57,16 @@ int main()
     ostringstream ss;
     ss << "cat " << name;
     printf("$ %s\n", ss.str().c_str());
-    system(ss.str().c_str());
+    [[maybe_unused]] int r1 = system(ss.str().c_str());
 
     logger.rotate();
 
     ss.str("");
     ss << "ls -li " << name << "*";
     printf("$ %s\n", ss.str().c_str());
-    system(ss.str().c_str());
+    [[maybe_unused]] int r2 = system(ss.str().c_str());
 
     ss.str("");
     ss << "rm " << name << "*";
-    system(ss.str().c_str());
+    [[maybe_unused]] int r3 = system(ss.str().c_str());
 }

@@ -1,4 +1,5 @@
 #define SOCKET_USE_OPENSSL
+//#define SOCKET_VERBOSE
 #include "socket.hpp"
 
 #include <signal.h>
@@ -8,64 +9,46 @@
 
 #include <cstdio>
 
+#include "logger.hpp"
 #include "thread_pool.hpp"
 
 using namespace std;
-using namespace std::chrono;
 using namespace tbd;
 
-inline char* now()
-{
-    thread_local char buf[32] = {0};
-
-    auto count = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
-    auto sec = count / (1000 * 1000);
-    auto usec = count % (1000 * 1000);
-    struct tm tm;
-    localtime_r(&sec, &tm);
-    strftime(buf, 21, "%F %T.", &tm);
-    sprintf(buf + 20, "%06ld", usec);
-    return buf;
-}
-
-#if 1
-#    define LOG(fmt, ...) printf("%s [%04ld] " fmt, now(), syscall(SYS_gettid), ##__VA_ARGS__)
-#else
-#    define LOG(fmt, ...)
-#endif
+logger con("socket", "/dev/stdout");
 
 void cloop(connector& cli)
 {
-    auto [host, lport] = cli.local_endpoint();
-    auto [peer, rport] = cli.remote_endpoint();
-    LOG("client : connection from %s:%u to %s:%u\n", host.c_str(), lport, peer.c_str(), rport);
+    auto l = cli.local_endpoint();
+    auto r = cli.remote_endpoint();
+    con.info("client : connection from %s to %s", l.to_string().c_str(), r.to_string().c_str());
     usleep(50 * 1000);
     for (int i = 0; i < 10; ++i) {
-        auto ec = cli.send(to_string(i));
-        if (ec) {
-            LOG("client : send error: %s\n", ec.message().c_str());
+        auto ret = cli.send(to_string(i));
+        if (!ret) {
+            con.info("client : send error: %s", ret.message().c_str());
             break;
         }
     }
-    LOG("client : done\n");
+    con.info("client : done");
     cli.close();
 }
 
 void sloop(io_socket& sess)
 {
-    auto [peer, port] = sess.remote_endpoint();
-    LOG("server : new connection accepted from %s:%u\n", peer.c_str(), port);
+    auto peer = sess.remote_endpoint();
+    con.info("server : new connection accepted from %s", peer.to_string().c_str());
 
     while (true) {
         char buf[128] = {0};
-        auto ec = sess.recv_some(buf, 1);
-        if (ec) {
-            LOG("session: receive error: %s\n", ec.message().c_str());
+        auto ret = sess.recv_some(buf, 1);
+        if (!ret) {
+            con.info("session: receive error: %s", ret.message().c_str());
             break;
         }
-        LOG("session: recv [%s]\n", buf);
+        con.info("session: recv [%s]", buf);
     }
-    LOG("server : done\n");
+    con.info("server : done");
 }
 
 void c2s(connector& cli, acceptor& srv)
@@ -95,7 +78,7 @@ void c2s_nb(connector& cli, acceptor& srv)
             if (!sess) {
                 continue;
             }
-            LOG("server : nacpt=%d\n", nacpt);
+            con.info("server : nacpt=%d", nacpt);
             sloop(sess);
             break;
         }
@@ -105,7 +88,7 @@ void c2s_nb(connector& cli, acceptor& srv)
     while (!cli.connect_nb()) {
         ++nconn;
     }
-    LOG("client : nconn=%d\n", ++nconn);
+    con.info("client : nconn=%d", ++nconn);
     cloop(cli);
 }
 
