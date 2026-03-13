@@ -1,0 +1,167 @@
+#include "descriptor.hpp"
+
+#include <assert.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+
+#include <string>
+
+using namespace std;
+using namespace tbd;
+using namespace std::string_literals;
+
+template <typename C, typename P>
+void fork_run(C&& c, P&& p)
+{
+    auto pid = fork();
+    if (pid == 0) {
+        c();
+        _exit(0);
+    }
+    p();
+    int status;
+    waitpid(pid, &status, 0);
+}
+
+template <typename F>
+void c2p(F&& gen)
+{
+    auto [r, w] = gen();
+    fork_run([&w] { w.write("hello", 5); },
+             [&r] {
+                 char buf[32] = {0};
+                 r.read(buf, 32);
+                 printf("read \"%s\"\n", buf);
+             });
+}
+
+void ex_pipe()
+{
+    printf("pipe: ");
+    c2p([] { return make_pipe(); });
+}
+
+void ex_sockpair()
+{
+    printf("sock: ");
+    c2p([] { return make_socketpair(); });
+}
+
+void ex_fifo()
+{
+    printf("fifo: ");
+    c2p([] {
+        fifo r("./.fifo-tmp");
+        fifo w("./.fifo-tmp", O_WRONLY);
+        r.set_nonblock(false);
+        return make_pair(move(r), move(w));
+    });
+}
+
+void ex_mqueue()
+{
+    mq_unlink("/.mqueue");
+    printf("mque: ");
+    c2p([] { return make_pair(mqueue("/.mqueue", 1, 32), mqueue("/.mqueue", 1, 32)); });
+}
+
+void ex_epoll()
+{
+    tbd::epollfd epfd;
+    tbd::timerfd timfd(100);
+    epfd.add(timfd);
+    auto ev = epfd.wait();
+    assert(ev.size() >= 1);
+    assert(ev[0].fd == *timfd);
+}
+
+void ex_poll()
+{
+    tbd::poll poll;
+    tbd::timerfd timfd(100);
+    poll.add(timfd);
+    auto ev = poll.wait();
+    assert(ev.size() >= 1);
+    assert(ev[0].fd == *timfd);
+}
+
+void ex_eventfd()
+{
+    tbd::eventfd evfd;
+    evfd.set_nonblock();
+    try {
+        evfd.read();
+        assert(false);
+    } catch (const system_error& e) {
+        assert(e.code().value() == EAGAIN);
+    }
+    evfd.write(42);
+    assert(evfd.read() == 42);
+}
+
+void ex_memfd()
+{
+    tbd::memfd memfd("./memfd_demo");
+    tbd::eventfd evfd;
+    fork_run(
+        [&] {
+            memfd.write("hello", 5);
+            evfd.write();
+        },
+        [&] {
+            (void)evfd.read();
+            lseek(*memfd, 0, SEEK_SET);
+            char buf[8] = {0};
+            memfd.read(buf, 8);
+            printf("memf: read \"%s\"\n", buf);
+        });
+}
+
+void ex_signalfd()
+{
+    tbd::signalfd sigfd({SIGUSR1});
+    fork_run([&] { kill(getppid(), SIGUSR1); },  //
+             [&] { assert(sigfd.get_last_signal() == SIGUSR1); });
+}
+
+void ex_timerfd()
+{
+    tbd::timerfd timfd(100);
+    assert(timfd.read() == 1);
+}
+
+void ex_inotify()
+{
+    inotify infd;
+    infd.add_watch(".", IN_CREATE);
+    [[maybe_unused]] int r1 = system("touch .hello");
+    try {
+        auto evs = infd.read();
+        for (const auto& ev : evs) {
+            printf("inot: path %s, mask %x\n", ev.path.c_str(), ev.mask);
+        }
+    } catch (const std::exception& e) {
+        printf("infd: %s\n", e.what());
+    }
+    [[maybe_unused]] int r2 = system("rm -f .hello");
+}
+
+int main()
+{
+    // communication channels
+    ex_pipe();
+    ex_sockpair();
+    ex_fifo();
+    ex_mqueue();
+
+    // event notifying
+    ex_epoll();
+    ex_poll();
+    ex_eventfd();
+    ex_memfd();
+    ex_signalfd();
+    ex_timerfd();
+    ex_inotify();
+
+    return 0;
+}

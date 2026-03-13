@@ -679,9 +679,15 @@ class timerfd : public descriptor
     void clear() const
     {
         if (is_readable()) {
-            uint64_t count;
-            read(&count, sizeof(count));
+            (void)read();
         }
+    }
+
+    uint64_t read() const
+    {
+        uint64_t count = 0;
+        descriptor::read(&count, sizeof(count));
+        return count;
     }
 
     size_t write(const void*, size_t) = delete;
