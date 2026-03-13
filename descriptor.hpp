@@ -595,18 +595,6 @@ class eventfd : public descriptor
     }
 };
 
-class memfd : public descriptor
-{
-  public:
-    explicit memfd(std::string_view name)
-        : descriptor(::memfd_create(name.data(), 0))
-    {
-    }
-
-    memfd(memfd&&) noexcept = default;
-    memfd& operator=(memfd&&) noexcept = default;
-};
-
 class signalfd : public descriptor
 {
   public:
@@ -762,6 +750,86 @@ class inotify : public descriptor
 
   private:
     std::unordered_map<int, std::string> watches_;
+};
+
+/****************************************************************************
+ * memory io
+ */
+class memfd : public descriptor
+{
+  public:
+    explicit memfd(std::string_view name)
+        : descriptor(::memfd_create(name.data(), 0))
+    {
+    }
+
+    memfd(memfd&&) noexcept = default;
+    memfd& operator=(memfd&&) noexcept = default;
+};
+
+class mmapper : public descriptor
+{
+  public:
+    explicit mmapper(std::string_view filename)
+        : descriptor(::open(filename.data(), O_RDONLY))
+    {
+        if (::fstat(*fd_, &statbuf_) < 0) {
+            throw std::system_error(errno, std::generic_category());
+        }
+
+        if ((area_ = ::mmap(nullptr, statbuf_.st_size, PROT_READ, MAP_PRIVATE, *fd_, 0)) ==
+            MAP_FAILED) {
+            throw std::system_error(errno, std::generic_category());
+        }
+
+        (void)::posix_madvise(area_, statbuf_.st_size, POSIX_MADV_WILLNEED);
+    }
+
+    mmapper(mmapper&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , statbuf_(std::exchange(rhs.statbuf_, {}))
+        , area_(std::exchange(rhs.area_, nullptr))
+    {
+    }
+    mmapper& operator=(mmapper&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            unmap();
+            descriptor::operator=(std::move(rhs));
+            statbuf_ = std::exchange(rhs.statbuf_, {});
+            area_ = std::exchange(rhs.area_, nullptr);
+        }
+        return *this;
+    }
+
+    ~mmapper() noexcept
+    {
+        unmap();
+    }
+
+    const void* data() const noexcept
+    {
+        return area_;
+    }
+
+    size_t size() const noexcept
+    {
+        return statbuf_.st_size;
+    }
+
+    size_t write(const void*, size_t) = delete;
+
+  private:
+    struct stat statbuf_ = {};
+    void* area_ = nullptr;
+
+    void unmap() noexcept
+    {
+        if (area_) {
+            ::munmap(area_, statbuf_.st_size);
+            area_ = nullptr;
+        }
+    }
 };
 
 }  // namespace tbd

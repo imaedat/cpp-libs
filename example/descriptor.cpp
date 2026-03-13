@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 
 #include <string>
@@ -99,24 +100,6 @@ void ex_eventfd()
     assert(evfd.read() == 42);
 }
 
-void ex_memfd()
-{
-    tbd::memfd memfd("./memfd_demo");
-    tbd::eventfd evfd;
-    fork_run(
-        [&] {
-            memfd.write("hello", 5);
-            evfd.write();
-        },
-        [&] {
-            (void)evfd.read();
-            lseek(*memfd, 0, SEEK_SET);
-            char buf[8] = {0};
-            memfd.read(buf, 8);
-            printf("memf: read \"%s\"\n", buf);
-        });
-}
-
 void ex_signalfd()
 {
     tbd::signalfd sigfd({SIGUSR1});
@@ -146,6 +129,39 @@ void ex_inotify()
     [[maybe_unused]] int r2 = system("rm -f .hello");
 }
 
+void ex_memfd()
+{
+    tbd::memfd memfd("./memfd_demo");
+    tbd::eventfd evfd;
+    fork_run(
+        [&] {
+            memfd.write("hello", 5);
+            evfd.write();
+        },
+        [&] {
+            (void)evfd.read();
+            lseek(*memfd, 0, SEEK_SET);
+            char buf[8] = {0};
+            memfd.read(buf, 8);
+            printf("memf: read \"%s\"\n", buf);
+        });
+}
+
+void ex_mmap()
+{
+    mmapper map("/proc/self/exe");
+    char buf[8] = {0};
+    memcpy(buf, (char*)map.data() + 1, 3);
+    printf("mmap: read \"%s\"\n", buf);
+
+    auto map2 = move(map);
+    assert(map.data() == nullptr);
+
+    map2 = mmapper("/etc/passwd");
+    map2.read(buf, 4);
+    printf("mmap: read \"%s\"\n", buf);
+}
+
 int main()
 {
     // communication channels
@@ -158,10 +174,13 @@ int main()
     ex_epoll();
     ex_poll();
     ex_eventfd();
-    ex_memfd();
     ex_signalfd();
     ex_timerfd();
     ex_inotify();
+
+    // memory io
+    ex_memfd();
+    ex_mmap();
 
     return 0;
 }
