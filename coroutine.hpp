@@ -288,6 +288,9 @@ class coroutine_env
     coroutine_env& operator=(coroutine_env&& rhs) noexcept
     {
         if (this != &rhs) {
+            if (uctx_) {
+                ::free(uctx_);
+            }
             ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
             ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
             uctx_ = std::exchange(rhs.uctx_, nullptr);
