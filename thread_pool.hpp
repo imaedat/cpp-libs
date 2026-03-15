@@ -5,6 +5,8 @@
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <future>
@@ -49,18 +51,58 @@ class thread_pool
             }
         };
 
-        std::unique_ptr<concept> fp_;
+        static constexpr size_t BUFFER_SIZE = 32;
+        alignas(std::max_align_t) uint8_t buffer_[BUFFER_SIZE];
+        concept* fp_ = nullptr;
+
+        bool use_sbo() const
+        {
+            return fp_ == reinterpret_cast<const concept*>(buffer_);
+        }
 
       public:
         template <typename F>
         explicit task(F&& f)
-            : fp_(std::make_unique<model<F>>(std::move(f)))
         {
+            using M = model<std::decay_t<F>>;
+            if constexpr (sizeof(M) <= BUFFER_SIZE) {
+                fp_ = new (buffer_) M(std::forward<F>(f));
+            } else {
+                fp_ = new M(std::forward<F>(f));
+            }
         }
-        task(task&&) noexcept = default;
-        task& operator=(task&&) noexcept = default;
+        task(task&& rhs) noexcept
+        {
+            bool use_sbo = rhs.use_sbo();
+            fp_ = std::exchange(rhs.fp_, nullptr);
+            if (fp_ && use_sbo) {
+                ::memcpy(buffer_, rhs.buffer_, BUFFER_SIZE);
+                fp_ = reinterpret_cast<concept*>(buffer_);
+            }
+        }
+        task& operator=(task&& rhs) noexcept
+        {
+            if (this != &rhs) {
+                this->~task();
+                new (this) task(std::move(rhs));
+            }
+            return *this;
+        }
+        ~task()
+        {
+            if (fp_) {
+                if (use_sbo()) {
+                    fp_->~concept();
+                } else {
+                    delete fp_;
+                }
+                fp_ = nullptr;
+            }
+        }
+
         void operator()()
         {
+            assert(fp_);
             fp_->invoke();
         }
     };
