@@ -1,3 +1,4 @@
+#define COROUTINE_USE_SETJMP
 #include "coroutine.hpp"
 
 #include <iostream>
@@ -104,14 +105,14 @@ void noncopyable()
 
     coroutine_env<non_copyable, non_copyable> env;
 
-    auto co1 = env.spawn([](const auto& yield, auto&& init) {
+    auto co1 = env.spawn([](const auto& ctx, auto&& init) {
         cout << "co1: initial_value: " << init->val << endl;
 
         non_copyable nc("co1-1");
-        auto x = yield(move(nc));
+        auto x = ctx.yield(move(nc));
         cout << "co1: passed by end: " << x->val << endl;
 
-        yield.exit(non_copyable("co1-2"));
+        ctx.exit(non_copyable("co1-2"));
     });
 
     auto x = co1.resume(non_copyable("hello"));

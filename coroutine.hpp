@@ -46,60 +46,64 @@ class coroutine_env
     using co_arg_type = std::optional<A>;
     inline static constexpr char MAGIC[] = {0x7f, 'C', 'O', 'E'};
 
-    struct context;
-    class yielder
+    struct state;
+    class context
     {
       public:
-        /* yield function */
-        co_arg_type operator()(co_gen_type&& g = {}) const
+        co_arg_type yield(co_gen_type&& g = {}) const
         {
-            assert_context();
-            ctx_->env_->last_value_ = std::forward<co_gen_type>(g);
+            assert_state();
+            state_->env_->last_value_ = std::forward<co_gen_type>(g);
 #ifdef COROUTINE_USE_SETJMP
-            if (::setjmp(ctx_->uctx_) == 0) {
-                ::longjmp(*ctx_->env_->uctx_, 1);
+            if (::setjmp(state_->uctx_) == 0) {
+                ::longjmp(*state_->env_->uctx_, 1);
             }
 #else
-            if (::swapcontext(&ctx_->uctx_, ctx_->env_->uctx_) < 0) {
-                throw std::system_error(errno, std::generic_category(), "coroutine: swapcontext");
+            if (::swapcontext(&state_->uctx_, state_->env_->uctx_) < 0) {
+                throw std::system_error(errno, std::generic_category(), "context: swapcontext");
             }
 #endif
-            return std::move(ctx_->value_);
+            return std::move(state_->value_);
+        }
+
+        co_arg_type operator()(co_gen_type&& g = {}) const
+        {
+            return yield(std::forward<co_gen_type>(g));
         }
 
         void exit(co_gen_type&& g = {}) const
         {
-            assert_context();
-            ctx_->finished_ = true;
-            (*this)(std::forward<co_gen_type>(g));
+            assert_state();
+            state_->finished_ = true;
+            yield(std::forward<co_gen_type>(g));
         }
 
       private:
-        context* ctx_ = nullptr;
+        state* state_ = nullptr;
 
-        explicit yielder(context* ctx) noexcept
-            : ctx_(ctx)
+        explicit context(state* state) noexcept
+            : state_(state)
         {
         }
 
-        void assert_context() const
+        void assert_state() const
         {
-            if (!ctx_) {
-                throw std::invalid_argument("yielder: invalid context");
+            if (!state_) {
+                throw std::invalid_argument("context: invalid state");
             }
-            if (!ctx_->env_ || ::memcmp(ctx_->env_, MAGIC, sizeof(MAGIC)) != 0) {
-                throw std::invalid_argument("yielder: env expired");
+            if (!state_->env_ || ::memcmp(state_->env_, MAGIC, sizeof(MAGIC)) != 0) {
+                throw std::invalid_argument("context: env expired");
             }
         }
 
-        friend class context;
-    };  // yielder
+        friend class state;
+    };  // context
 
-    using coro_without_init = std::function<void(const yielder&)>;
-    using coro_with_init = std::function<void(const yielder&, co_arg_type&&)>;
+    using coro_without_init = std::function<void(const context&)>;
+    using coro_with_init = std::function<void(const context&, co_arg_type&&)>;
     using coro_fn = std::variant<coro_without_init, coro_with_init>;
 
-    struct context
+    struct state
     {
         coro_fn fn_;
         size_t stack_size_;
@@ -115,7 +119,7 @@ class coroutine_env
         co_arg_type value_;
         std::exception_ptr exception_;
 
-        context(coro_fn&& fn, size_t ss, coroutine_env<G, A>* env)
+        state(coro_fn&& fn, size_t ss, coroutine_env<G, A>* env)
             : fn_(std::forward<coro_fn>(fn))
             , stack_size_(ss)
             , stack_(nullptr)
@@ -124,20 +128,20 @@ class coroutine_env
         {
 #ifndef COROUTINE_USE_SETJMP
             if (::getcontext(&uctx_) < 0) {
-                throw std::system_error(errno, std::generic_category(), "context: getcontext");
+                throw std::system_error(errno, std::generic_category(), "state: getcontext");
             }
 #endif
 
             size_t pagesz = ::sysconf(_SC_PAGE_SIZE);
             stack_size_ = (stack_size_ + pagesz - 1) & ~(pagesz - 1);  // align
             if (auto err = ::posix_memalign((void**)&stack_, pagesz, pagesz + stack_size_)) {
-                throw std::system_error(err, std::generic_category(), "context: posix_memalign");
+                throw std::system_error(err, std::generic_category(), "state: posix_memalign");
             }
             if (::mprotect(stack_, pagesz, PROT_NONE) < 0) {  // guard page
                 auto err = errno;
                 ::free(stack_);
                 stack_ = nullptr;
-                throw std::system_error(err, std::generic_category(), "context: mprotect");
+                throw std::system_error(err, std::generic_category(), "state: mprotect");
             }
 
 #ifdef COROUTINE_USE_SETJMP
@@ -154,11 +158,11 @@ class coroutine_env
 #endif
         }
 
-        context(const context&) = delete;
-        context& operator=(const context&) = delete;
-        context(context&&) = delete;
-        context& operator=(context&&) = delete;
-        ~context() noexcept
+        state(const state&) = delete;
+        state& operator=(const state&) = delete;
+        state(state&&) = delete;
+        state& operator=(state&&) = delete;
+        ~state() noexcept
         {
             if (stack_) {
                 ::mprotect(stack_, ::sysconf(_SC_PAGE_SIZE), PROT_READ | PROT_WRITE);
@@ -169,20 +173,19 @@ class coroutine_env
 
         static void entry(unsigned hi, unsigned lo) noexcept
         {
-            auto ptr = ((uintptr_t)hi << 32) | lo;
-            auto* ctx = (context*)ptr;
+            auto* state = (coroutine_env<G, A>::state*)(((uintptr_t)hi << 32) | lo);
             try {
-                if (auto fn = std::get_if<coro_without_init>(&ctx->fn_)) {
-                    (*fn)(yielder(ctx));
-                } else if (auto fn = std::get_if<coro_with_init>(&ctx->fn_)) {
-                    (*fn)(yielder(ctx), std::move(ctx->value_));
+                if (auto fn = std::get_if<coro_without_init>(&state->fn_)) {
+                    (*fn)(context(state));
+                } else if (auto fn = std::get_if<coro_with_init>(&state->fn_)) {
+                    (*fn)(context(state), std::move(state->value_));
                 }
             } catch (...) {
-                ctx->exception_ = std::current_exception();
+                state->exception_ = std::current_exception();
             }
-            ctx->finished_ = true;
+            state->finished_ = true;
         }
-    };  // context
+    };  // state
 
   public:
     class coroutine
@@ -194,44 +197,44 @@ class coroutine_env
 
         explicit operator bool() const noexcept
         {
-            return ctx_ && !ctx_->finished_;
+            return state_ && !state_->finished_;
         }
 
         co_gen_type resume(co_arg_type&& a = {})
         {
-            if (!ctx_ || !ctx_->stack_) {
-                throw std::invalid_argument("coroutine: invalid context");
+            if (!state_ || !state_->stack_) {
+                throw std::invalid_argument("coroutine: invalid state");
             }
-            if (!ctx_->env_ || ::memcmp(ctx_->env_, MAGIC, sizeof(MAGIC)) != 0) {
+            if (!state_->env_ || ::memcmp(state_->env_, MAGIC, sizeof(MAGIC)) != 0) {
                 throw std::invalid_argument("coroutine: env expired");
             }
 
-            if (ctx_->finished_) {
-                assert(!ctx_->finished_);
+            if (state_->finished_) {
+                assert(!state_->finished_);
                 return std::nullopt;
             }
 
-            ctx_->value_ = std::forward<co_arg_type>(a);
+            state_->value_ = std::forward<co_arg_type>(a);
 #ifdef COROUTINE_USE_SETJMP
-            if (::setjmp(*ctx_->env_->uctx_) == 0) {
-                ::longjmp(ctx_->uctx_, 1);
+            if (::setjmp(*state_->env_->uctx_) == 0) {
+                ::longjmp(state_->uctx_, 1);
             }
 #else
-            if (::swapcontext(ctx_->env_->uctx_, &ctx_->uctx_) < 0) {
+            if (::swapcontext(state_->env_->uctx_, &state_->uctx_) < 0) {
                 throw std::system_error(errno, std::generic_category(), "coroutine: swapcontext");
             }
 #endif
 
-            if (ctx_->exception_) {
-                auto ep = std::move(ctx_->exception_);
-                ctx_->exception_ = nullptr;
+            if (state_->exception_) {
+                auto ep = std::move(state_->exception_);
+                state_->exception_ = nullptr;
                 std::rethrow_exception(ep);
             }
 
-            if (ctx_->env_->last_value_) {
+            if (state_->env_->last_value_) {
                 // on yield w/ value
-                auto val = std::move(*ctx_->env_->last_value_);
-                ctx_->env_->last_value_ = std::nullopt;
+                auto val = std::move(*state_->env_->last_value_);
+                state_->env_->last_value_ = std::nullopt;
                 return val;
             } else {
                 // on yield w/o value, or on return
@@ -240,10 +243,10 @@ class coroutine_env
         }
 
       private:
-        std::unique_ptr<context> ctx_ = nullptr;
+        std::unique_ptr<state> state_ = nullptr;
 
         coroutine(coro_fn&& fn, size_t ss, coroutine_env<G, A>* env)
-            : ctx_(std::make_unique<context>(std::forward<coro_fn>(fn), ss, env))
+            : state_(std::make_unique<state>(std::forward<coro_fn>(fn), ss, env))
         {
         }
 
@@ -312,16 +315,16 @@ class coroutine_env
     coroutine spawn(F&& fn, size_t ss = COROUTINE_STACK_SIZE) &
     {
         coroutine co;
-        if constexpr (std::is_invocable_v<F, const yielder&>) {
+        if constexpr (std::is_invocable_v<F, const context&>) {
             co = coroutine(coro_without_init(std::forward<F>(fn)), ss, this);
-        } else if constexpr (std::is_invocable_v<F, const yielder&, co_arg_type&&>) {
+        } else if constexpr (std::is_invocable_v<F, const context&, co_arg_type&&>) {
             co = coroutine(coro_with_init(std::forward<F>(fn)), ss, this);
         } else {
             static_assert(detail::always_false_v<F>, "invalid coroutine signature");
         }
 
 #ifdef COROUTINE_USE_SETJMP
-        if (::sigaltstack(&co.ctx_->ss_, nullptr) < 0) {
+        if (::sigaltstack(&co.state_->ss_, nullptr) < 0) {
             throw std::system_error(errno, std::generic_category(), "coroutine_env: sigaltstack");
         }
 
@@ -333,7 +336,7 @@ class coroutine_env
             throw std::system_error(errno, std::generic_category(), "coroutine_env: sigaction");
         }
         union sigval sv;
-        sv.sival_ptr = co.ctx_.get();
+        sv.sival_ptr = co.state_.get();
         ::pthread_sigqueue(::pthread_self(), SIGURG, sv);
 
         stack_t oss = {};
@@ -355,19 +358,19 @@ class coroutine_env
     {
         assert(signum == SIGURG);
 
-        auto* ctx = (context*)si->si_value.sival_ptr;
-        if (::setjmp(ctx->uctx_) == 0) {
+        auto* state = (coroutine_env<G, A>::state*)si->si_value.sival_ptr;
+        if (::setjmp(state->uctx_) == 0) {
             return;
         }
 
-        auto ptr = (uintptr_t)ctx;
-        context::entry((unsigned)(ptr >> 32), (unsigned)(ptr & 0xffffffffU));
-        if (!ctx->env_ || ::memcmp(ctx->env_, MAGIC, sizeof(MAGIC)) != 0) {
-            throw std::invalid_argument("coroutine: env expired");
+        auto ptr = (uintptr_t)state;
+        state::entry((unsigned)(ptr >> 32), (unsigned)(ptr & 0xffffffffU));
+        if (!state->env_ || ::memcmp(state->env_, MAGIC, sizeof(MAGIC)) != 0) {
+            throw std::invalid_argument("coroutine_env: env expired");
         }
 
-        ctx->finished_ = true;
-        ::longjmp(*ctx->env_->uctx_, 1);
+        state->finished_ = true;
+        ::longjmp(*state->env_->uctx_, 1);
     }
 #endif
 };
