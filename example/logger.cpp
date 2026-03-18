@@ -10,6 +10,32 @@ using namespace std;
 using namespace std::string_literals;
 using namespace tbd;
 
+namespace {
+template <typename T>
+string to_string(const T& value)
+{
+    if constexpr (is_convertible_v<T, string_view>) {
+        return string(string_view(value));
+    } else if constexpr (is_arithmetic_v<T>) {
+        return std::to_string(value);
+    }
+
+    static_assert(is_convertible_v<T, string_view> || is_arithmetic_v<T>,
+                  "Unsupported type for string concatenation");
+    return "";
+}
+
+template <typename... Args>
+void command(const Args&... args)
+{
+    string cmd;
+    cmd.reserve(128);
+    (cmd += ... += to_string(args));
+    printf("$ %s\n", cmd.c_str());
+    [[maybe_unused]] int ret = system(cmd.c_str());
+}
+}  // namespace
+
 int main()
 {
     srandom(time(nullptr));
@@ -54,19 +80,30 @@ int main()
 
     logger.flush();
 
-    ostringstream ss;
-    ss << "cat " << name;
-    printf("$ %s\n", ss.str().c_str());
-    [[maybe_unused]] int r1 = system(ss.str().c_str());
+    puts("---");
+    command("cat ", name);
 
+    puts("---");
+    command("mv ", name, " ", name + ".bak"s);
+    puts("# reopen and write");
+
+    logger.info("before reopen");
+    logger.reopen();
+    logger.info("after reopen");
+    logger.flush();
+
+    command("ls -li ", name + "*"s);
+    command("cat ", name);
+
+    puts("---");
+    puts("# rotate and write");
     logger.rotate();
+    logger.info("after rotate");
+    logger.flush();
 
-    ss.str("");
-    ss << "ls -li " << name << "*";
-    printf("$ %s\n", ss.str().c_str());
-    [[maybe_unused]] int r2 = system(ss.str().c_str());
+    command("ls -li ", name + "*"s);
+    command("cat ", name);
 
-    ss.str("");
-    ss << "rm " << name << "*";
-    [[maybe_unused]] int r3 = system(ss.str().c_str());
+    puts("---");
+    command("rm -fv ", name + "*"s);
 }

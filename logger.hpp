@@ -10,6 +10,7 @@
 #include <cassert>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <memory>
@@ -202,6 +203,11 @@ class logger
         ctl(req_type::flush);
     }
 
+    void reopen()
+    {
+        ctl(req_type::reopen);
+    }
+
     void rotate()
     {
         ctl(req_type::rotate);
@@ -238,6 +244,7 @@ class logger
     {
         log = 1,
         flush,
+        reopen,
         rotate,
         close,
     };
@@ -381,8 +388,12 @@ class logger
                     ::fflush(fp_);
                     break;
 
+                case req_type::reopen:
+                    reopen_();
+                    break;
+
                 case req_type::rotate:
-                    log_rotate();
+                    rotate_();
                     break;
 
                 case req_type::close:
@@ -418,7 +429,21 @@ class logger
         }
     }
 
-    void log_rotate()
+    void reopen_()
+    {
+        auto newfp = ::fopen(filepath_.c_str(), "a");
+        if (!newfp) {
+            ::fprintf(stderr, "logger: reopen failed: file path = %s (%s)\n", filepath_.c_str(),
+                      ::strerror(errno));
+            return;
+        }
+
+        ::fflush(fp_);
+        ::fclose(fp_);
+        fp_ = newfp;
+    }
+
+    void rotate_()
     {
         auto now = ::time(nullptr);
         struct tm tm = {};
@@ -427,18 +452,16 @@ class logger
         ::strftime(suffix, 15, "-%Y%m%d", &tm);
         auto rotate_path = filepath_;
         rotate_path.concat(suffix);
-        ::fflush(fp_);
-        ::fclose(fp_);
 
         std::error_code ec;
         std::filesystem::rename(filepath_, rotate_path, ec);
         if (ec) {
             ::fprintf(stderr, "logger: rotate failed: original path = %s, rotate path = %s (%s)\n",
                       filepath_.c_str(), rotate_path.c_str(), ec.message().c_str());
+            return;
         }
 
-        fp_ = ::fopen(filepath_.c_str(), "a");
-        assert(fp_);
+        reopen_();
     }
 };
 
