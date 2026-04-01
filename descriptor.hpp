@@ -767,68 +767,134 @@ class memfd : public descriptor
     memfd& operator=(memfd&&) noexcept = default;
 };
 
-class mmapper : public descriptor
+class memmap : public descriptor
 {
   public:
-    explicit mmapper(std::string_view filename)
-        : descriptor(::open(filename.data(), O_RDONLY))
+    explicit memmap(std::string_view filename, size_t length = 0, int prot = PROT_READ,
+                    int flags = MAP_PRIVATE)
+        : memmap(::open(filename.data(), O_RDONLY), length, prot, flags)
     {
-        if (::fstat(*fd_, &statbuf_) < 0) {
-            throw std::system_error(errno, std::generic_category());
-        }
-
-        if ((area_ = ::mmap(nullptr, statbuf_.st_size, PROT_READ, MAP_PRIVATE, *fd_, 0)) ==
-            MAP_FAILED) {
-            throw std::system_error(errno, std::generic_category());
-        }
-
-        (void)::posix_madvise(area_, statbuf_.st_size, POSIX_MADV_WILLNEED);
     }
 
-    mmapper(mmapper&& rhs) noexcept
+    memmap(memmap&& rhs) noexcept
         : descriptor(std::move(rhs))
-        , statbuf_(std::exchange(rhs.statbuf_, {}))
+        , length_(std::exchange(rhs.length_, 0))
         , area_(std::exchange(rhs.area_, nullptr))
     {
     }
-    mmapper& operator=(mmapper&& rhs) noexcept
+    memmap& operator=(memmap&& rhs) noexcept
     {
         if (this != &rhs) {
-            unmap();
+            unmap_();
             descriptor::operator=(std::move(rhs));
-            statbuf_ = std::exchange(rhs.statbuf_, {});
+            length_ = std::exchange(rhs.length_, 0);
             area_ = std::exchange(rhs.area_, nullptr);
         }
         return *this;
     }
 
-    ~mmapper() noexcept
+    ~memmap() noexcept
     {
-        unmap();
+        unmap_();
     }
 
-    const void* data() const noexcept
+    void* data() noexcept
     {
         return area_;
     }
 
-    size_t size() const noexcept
+    size_t length() const noexcept
     {
-        return statbuf_.st_size;
+        return length_;
     }
 
-    size_t write(const void*, size_t) = delete;
+  protected:
+    memmap(int fd, size_t length, int prot = PROT_READ | PROT_WRITE, int flags = MAP_SHARED)
+        : descriptor(fd)
+        , length_(length)
+    {
+        if (length_ == 0) {
+            struct stat sb;
+            if (::fstat(*fd_, &sb) < 0) {
+                throw std::system_error(errno, std::generic_category());
+            }
+            length_ = sb.st_size;
+        }
+
+        if ((area_ = ::mmap(nullptr, length_, prot, flags, *fd_, 0)) == MAP_FAILED) {
+            throw std::system_error(errno, std::generic_category());
+        }
+
+        if (prot == PROT_READ) {
+            (void)::posix_madvise(area_, length_, POSIX_MADV_WILLNEED);
+        }
+    }
 
   private:
-    struct stat statbuf_ = {};
+    size_t length_ = 0;
     void* area_ = nullptr;
 
-    void unmap() noexcept
+    void unmap_() noexcept
     {
         if (area_) {
-            ::munmap(area_, statbuf_.st_size);
+            ::munmap(area_, length_);
             area_ = nullptr;
         }
+    }
+};
+
+class shmem : public memmap
+{
+    static constexpr size_t LENGTH = 4096;
+
+  public:
+    explicit shmem(std::string_view name, size_t length = LENGTH, int oflag = O_RDWR | O_CREAT)
+        : memmap(shmem_init(name, length, oflag), length, PROT_READ | PROT_WRITE, MAP_SHARED)
+        , name_(name)
+    {
+    }
+
+    shmem(shmem&& rhs) noexcept
+        : memmap(std::move(rhs))
+        , name_(std::exchange(rhs.name_, ""))
+    {
+    }
+    shmem& operator=(shmem&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            unlink_();
+            memmap::operator=(std::move(rhs));
+            name_ = std::exchange(rhs.name_, "");
+        }
+        return *this;
+    }
+
+    ~shmem() noexcept
+    {
+        unlink_();
+    }
+
+  private:
+    std::string name_;
+
+    void unlink_() noexcept
+    {
+        if (!name_.empty()) {
+            ::shm_unlink(name_.c_str());
+            name_.clear();
+        }
+    }
+
+    static int shmem_init(std::string_view name, size_t length, int oflag)
+    {
+        int fd = ::shm_open(name.data(), oflag, 0666);
+        if (fd < 0) {
+            detail::throw_syserr(errno, "shm_open");
+        }
+        if (::ftruncate(fd, length) < 0) {
+            detail::throw_syserr(errno, "ftruncate");
+        }
+        return fd;
     }
 };
 

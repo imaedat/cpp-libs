@@ -149,7 +149,7 @@ void ex_memfd()
 
 void ex_mmap()
 {
-    mmapper map("/proc/self/exe");
+    memmap map("/proc/self/exe");
     char buf[8] = {0};
     memcpy(buf, (char*)map.data() + 1, 3);
     printf("mmap: read \"%s\"\n", buf);
@@ -157,9 +157,28 @@ void ex_mmap()
     auto map2 = move(map);
     assert(map.data() == nullptr);
 
-    map2 = mmapper("/etc/passwd");
+    map2 = memmap("/etc/passwd");
     map2.read(buf, 4);
     printf("mmap: read \"%s\"\n", buf);
+}
+
+void ex_shmem()
+{
+    static constexpr const char* name = "/shmem_demo";
+    tbd::eventfd evfd;
+    fork_run(
+        [&] {
+            tbd::shmem shm(name);
+            memcpy(shm.data(), "hello", 5);
+            evfd.write();
+        },
+        [&] {
+            tbd::shmem shm(name);
+            (void)evfd.read();
+            char buf[8] = {0};
+            shm.read(buf, 8);
+            printf("shme: read \"%s\"\n", buf);
+        });
 }
 
 int main()
@@ -181,6 +200,7 @@ int main()
     // memory io
     ex_memfd();
     ex_mmap();
+    ex_shmem();
 
     return 0;
 }
