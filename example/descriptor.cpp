@@ -31,7 +31,9 @@ void c2p(F&& gen)
     fork_run([&w] { w.write("hello", 5); },
              [&r] {
                  char buf[32] = {0};
-                 r.read(buf, 32);
+                 auto res = r.read(buf, 32);
+                 assert(!!res);
+                 assert((int)res == 5);
                  printf("read \"%s\"\n", buf);
              });
 }
@@ -142,7 +144,8 @@ void ex_memfd()
             (void)evfd.read();
             lseek(*memfd, 0, SEEK_SET);
             char buf[8] = {0};
-            memfd.read(buf, 8);
+            auto n = (ssize_t)memfd.read(buf, 8);
+            assert(n == 5);
             printf("memf: read \"%s\"\n", buf);
         });
 }

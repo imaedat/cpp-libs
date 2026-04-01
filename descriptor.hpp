@@ -101,6 +101,50 @@ class fd_wrapper
 };
 }  // namespace detail
 
+class io_result
+{
+    std::error_code ec_{};
+    ssize_t nbytes_ = 0;
+
+  public:
+    explicit io_result(int err = 0, ssize_t n = 0)
+        : ec_(err, std::generic_category())
+        , nbytes_(n)
+    {
+    }
+
+    explicit operator bool() const noexcept
+    {
+        return !static_cast<bool>(ec_);
+    }
+
+    template <typename T, std::enable_if_t<std::is_integral_v<T>, bool> = true>
+    explicit operator T() const noexcept
+    {
+        return static_cast<T>(nbytes());
+    }
+
+    int code() const noexcept
+    {
+        return ec_.value();
+    }
+
+    std::string message() const
+    {
+        return ec_.message();
+    }
+
+    ssize_t nbytes() const noexcept
+    {
+        return nbytes_;
+    }
+
+    bool would_block() const noexcept
+    {
+        return ec_.value() == EAGAIN || ec_.value() == EWOULDBLOCK;
+    }
+};
+
 class descriptor
 {
   public:
@@ -173,22 +217,16 @@ class descriptor
         return wait_writable(0);
     }
 
-    virtual size_t read(void* buffer, size_t size) const
+    virtual io_result read(void* buffer, size_t size) const
     {
-        ssize_t nread = 0;
-        if ((nread = ::read(*fd_, buffer, size)) < 0) {
-            detail::throw_syserr(errno, "read");
-        }
-        return (size_t)nread;
+        auto nread = ::read(*fd_, buffer, size);
+        return io_result{nread < 0 ? errno : 0, nread};
     }
 
-    virtual size_t write(const void* buffer, size_t size) const
+    virtual io_result write(const void* buffer, size_t size) const
     {
-        ssize_t nwritten = 0;
-        if ((nwritten = ::write(*fd_, buffer, size)) < 0) {
-            detail::throw_syserr(errno, "write");
-        }
-        return (size_t)nwritten;
+        auto nwritten = ::write(*fd_, buffer, size);
+        return io_result{nwritten < 0 ? errno : 0, nwritten};
     }
 
   protected:
@@ -282,9 +320,9 @@ class mqueue : public descriptor
 {
   public:
     explicit mqueue(std::string_view name)
-        : name_(name)
+        : descriptor(::mq_open(name.data(), O_RDWR | O_CREAT, 0666, nullptr))
+        , name_(name)
     {
-        fd_ = detail::fd_wrapper(::mq_open(name_.c_str(), O_RDWR | O_CREAT, 0666, nullptr));
         if (::mq_getattr(*fd_, &attr_) < 0) {
             detail::throw_syserr(errno, "mq_getattr");
         }
@@ -333,29 +371,24 @@ class mqueue : public descriptor
         return attr_.mq_msgsize;
     }
 
-    size_t read(void* buffer, size_t size, unsigned* prio) const
+    io_result read(void* buffer, size_t size, unsigned* prio) const
     {
-        ssize_t nread = 0;
-        if ((nread = ::mq_receive(*fd_, (char*)buffer, size, prio)) < 0) {
-            detail::throw_syserr(errno, "mq_receive");
-        }
-        return (size_t)nread;
+        auto nread = ::mq_receive(*fd_, (char*)buffer, size, prio);
+        return io_result{nread < 0 ? errno : 0, nread};
     }
 
-    size_t read(void* buffer, size_t size) const override
+    io_result read(void* buffer, size_t size) const override
     {
         return read(buffer, size, nullptr);
     }
 
-    size_t write(const void* buffer, size_t size, unsigned prio) const
+    io_result write(const void* buffer, size_t size, unsigned prio) const
     {
-        if (::mq_send(*fd_, (const char*)buffer, size, prio) < 0) {
-            detail::throw_syserr(errno, "mq_send");
-        }
-        return size;
+        auto ret = ::mq_send(*fd_, (const char*)buffer, size, prio);
+        return io_result{ret == 0 ? 0 : errno, (ssize_t)(ret == 0 ? size : ret)};
     }
 
-    size_t write(const void* buffer, size_t size) const override
+    io_result write(const void* buffer, size_t size) const override
     {
         return write(buffer, size, 0);
     }
@@ -364,7 +397,7 @@ class mqueue : public descriptor
     std::string name_;
     struct mq_attr attr_ = {};
 
-    void unlink_()
+    void unlink_() noexcept
     {
         if (!name_.empty()) {
             ::mq_unlink(name_.c_str());
@@ -468,8 +501,8 @@ class epollfd : public descriptor
         return events;
     }
 
-    size_t read(void*, size_t) = delete;
-    size_t write(const void*, size_t) = delete;
+    io_result read(void*, size_t) = delete;
+    io_result write(const void*, size_t) = delete;
 
   private:
     size_t nregistered_ = 0;
@@ -585,13 +618,17 @@ class eventfd : public descriptor
     uint64_t read() const
     {
         uint64_t value = 0;
-        descriptor::read(&value, sizeof(value));
+        if (auto res = descriptor::read(&value, sizeof(value)); !res) {
+            detail::throw_syserr(res.code(), "read");
+        }
         return value;
     }
 
     void write(uint64_t value = 1) const
     {
-        descriptor::write(&value, sizeof(value));
+        if (auto res = descriptor::write(&value, sizeof(value)); !res) {
+            detail::throw_syserr(res.code(), "write");
+        }
     }
 };
 
@@ -621,7 +658,7 @@ class signalfd : public descriptor
         return siginfo.ssi_signo;
     }
 
-    size_t write(const void*, size_t) = delete;
+    io_result write(const void*, size_t) = delete;
 };
 
 class timerfd : public descriptor
@@ -678,7 +715,7 @@ class timerfd : public descriptor
         return count;
     }
 
-    size_t write(const void*, size_t) = delete;
+    io_result write(const void*, size_t) = delete;
 };
 
 class inotify : public descriptor
@@ -727,7 +764,7 @@ class inotify : public descriptor
         static constexpr size_t EVENT_SIZE = STRUCT_SIZE + NAME_MAX + 1;
 
         std::vector<uint8_t> buffer(EVENT_SIZE);
-        auto nread = descriptor::read(buffer.data(), EVENT_SIZE);
+        auto nread = (size_t)descriptor::read(buffer.data(), EVENT_SIZE);
 
         std::vector<event> events;
         auto* p = buffer.data();
@@ -746,7 +783,7 @@ class inotify : public descriptor
         return events;
     }
 
-    size_t write(const void*, size_t) = delete;
+    io_result write(const void*, size_t) = delete;
 
   private:
     std::unordered_map<int, std::string> watches_;
