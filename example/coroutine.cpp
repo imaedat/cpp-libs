@@ -10,41 +10,86 @@ void basic()
 {
     puts("\n--- basic pattern ---");
 
+    struct S
+    {
+        string s_;
+        S()
+            : s_(1024, 's')
+        {
+            cout << "S ctor (s_: " << s_.substr(0, 4) << "...)\n";
+        }
+        ~S() noexcept
+        {
+            cout << "S dtor\n";
+        }
+    };
+
     coro_env env;
 
+    cout << "# normal\n";
     auto co1 = env.spawn([](const auto& yield) {
-        printf("co1:hello");
+        cout << "co1:hello";
         yield();
-        printf("co1:HELLO");
+        cout << "co1:HELLO";
     });
 
     auto co2 = env.spawn([](const auto& yield) {
-        printf("co2:world\n");
+        cout << "co2:world\n";
         yield();
-        printf("co2:WORLD\n");
+        cout << "co2:WORLD\n";
     });
 
     co1.resume();
-    printf(" -> ");
+    cout << " -> ";
     co2.resume();
 
     co1.resume();
-    printf(" -> ");
-    co2.resume();
+    cout << " -> ";
+    auto co22 = move(co2);
+    co22.resume();
+    assert(!co22);
     assert(!co2);
 
+    cout << "# move, raii, exception\n";
     auto co3 = env.spawn([](const auto& yield) {
-        puts("co3 start");
-        throw 1;
+        cout << "co3 start\n";
+        [[maybe_unused]] S s;
+        throw 42;
         yield();
-        puts("co3 end (NOT REACHED)");
+        assert(false);
     });
 
+    auto env2 = move(env);
+    try {
+        co3.resume();
+    } catch (const invalid_argument&) {
+        cout << "co3's env has been moved\n";
+    }
+    env = move(env2);
     try {
         co3.resume();
     } catch (int n) {
-        printf("exception thrown in co3: %d\n", n);
+        cout << "exception thrown from co3: " << n << "\n";
     }
+    assert(!co3);
+
+    cout << "# nested\n";
+    auto co4 = env.spawn([](const auto& yield) {
+        cout << "co4:hello -> ";
+        coro_env inner;
+        auto cin = inner.spawn([](const auto& ctx) {
+            cout << "cin:world\n";
+            ctx.yield();
+            cout << "cin:HELLO -> ";
+        });
+        cin.resume();
+        yield();
+        cin.resume();
+        cout << "co4:WORLD\n";
+    });
+
+    co4.resume();
+    co4.resume();
 }
 
 void generator()
@@ -61,23 +106,25 @@ void generator()
 
     for (size_t i = 0; i < 10; ++i) {
         auto x = gen.resume();
-        cout << *x << endl;
+        cout << *x << ", ";
     }
+    cout << "..." << endl;
 }
 
 void copyable()
 {
     puts("\n--- yields copyable object ---");
 
-    coroutine_env<string, int> env;
-
     string s("hello");
-    auto co1 = env.spawn([s](const auto& yield, auto&& i) {
-        printf("co1: initial_value from env: %d\n", *i);
-        auto n = yield(s);
-        printf("co1: passed from env: %d\n", *n);
+    coroutine_env<string, int> env;
+    auto co1 = env.spawn([s](const auto& yield, auto&& init) {
+        cout << "co1: initial value: " << *init << endl;
+
+        auto x = yield(s);
+        cout << "co1: passed by env: " << *x << endl;
+
         [[maybe_unused]] auto m = yield("world");
-        puts("--- NOT REACHED HERE!!! ---");
+        assert(false);
     });
 
     auto x = co1.resume(10);  // pass by arg w/ 1st resume
@@ -88,37 +135,23 @@ void copyable()
 
 void noncopyable()
 {
-    puts("\n--- yields non_copyable object ---");
+    puts("\n--- yields non-copyable object ---");
 
-    struct non_copyable
-    {
-        string val;
-        explicit non_copyable(const string& s)
-            : val(s)
-        {
-        }
-        non_copyable(const non_copyable&) = delete;
-        non_copyable& operator=(const non_copyable&) = delete;
-        non_copyable(non_copyable&&) noexcept = default;
-        non_copyable& operator=(non_copyable&&) noexcept = default;
-    };
-
-    coroutine_env<non_copyable, non_copyable> env;
-
+    coroutine_env<unique_ptr<int>, unique_ptr<string>> env;
     auto co1 = env.spawn([](const auto& ctx, auto&& init) {
-        cout << "co1: initial_value: " << init->val << endl;
+        cout << "co1: initial value: " << **init << endl;
 
-        non_copyable nc("co1-1");
-        auto x = ctx.yield(move(nc));
-        cout << "co1: passed by end: " << x->val << endl;
+        auto up = make_unique<int>(10);
+        auto x = ctx.yield(move(up));
+        cout << "co1: passed by env: " << **x << endl;
 
-        ctx.exit(non_copyable("co1-2"));
+        ctx.exit(make_unique<int>(20));
     });
 
-    auto x = co1.resume(non_copyable("hello"));
-    cout << "env: yields by co1: " << x->val << endl;
-    auto y = co1.resume(non_copyable("world"));
-    cout << "env: yields by co1: " << y->val << endl;
+    auto x = co1.resume(make_unique<string>("hello"));
+    cout << "env: yields by co1: " << **x << endl;
+    auto y = co1.resume(make_unique<string>("world"));
+    cout << "env: yields by co1: " << **y << endl;
 }
 
 int main()
