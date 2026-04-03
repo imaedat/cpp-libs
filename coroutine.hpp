@@ -290,7 +290,7 @@ class coroutine_env
         , last_value_(std::move(rhs.last_value_))
     {
         ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
-        ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
+        ::explicit_bzero(&rhs.magic_, sizeof(rhs.magic_));
     }
     coroutine_env& operator=(coroutine_env&& rhs) noexcept
     {
@@ -299,7 +299,7 @@ class coroutine_env
                 ::free(uctx_);
             }
             ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
-            ::memset(&rhs.magic_, 0, sizeof(rhs.magic_));
+            ::explicit_bzero(&rhs.magic_, sizeof(rhs.magic_));
             uctx_ = std::exchange(rhs.uctx_, nullptr);
             last_value_ = std::move(rhs.last_value_);
         }
@@ -312,7 +312,7 @@ class coroutine_env
             ::free(uctx_);
             uctx_ = nullptr;
         }
-        ::memset(magic_, 0, sizeof(magic_));
+        ::explicit_bzero(magic_, sizeof(magic_));
     }
 
     template <typename F>
