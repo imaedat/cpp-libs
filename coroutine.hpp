@@ -334,11 +334,11 @@ class coroutine_env
             throw std::system_error(errno, std::generic_category(), "coroutine_env: sigaltstack");
         }
 
-        struct sigaction act;
+        struct sigaction act, oldact;
         ::sigemptyset(&act.sa_mask);
         act.sa_sigaction = spawn_handler;
         act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND | SA_RESTART;
-        if (::sigaction(SIGURG, &act, nullptr) < 0) {
+        if (::sigaction(SIGURG, &act, &oldact) < 0) {
             throw std::system_error(errno, std::generic_category(), "coroutine_env: sigaction");
         }
         union sigval sv;
@@ -349,6 +349,9 @@ class coroutine_env
         oss.ss_flags = SS_DISABLE;
         if (::sigaltstack(&oss, nullptr) < 0) {
             throw std::system_error(errno, std::generic_category(), "coroutine_env: sigaltstack");
+        }
+        if (::sigaction(SIGURG, &oldact, nullptr) < 0) {
+            throw std::system_error(errno, std::generic_category(), "coroutine_env: sigaction");
         }
 #endif
 
