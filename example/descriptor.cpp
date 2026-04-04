@@ -27,8 +27,10 @@ void fork_run(C&& c, P&& p)
 template <typename F>
 void c2p(F&& gen)
 {
-    auto [r, w] = gen();
-    fork_run([&w] { w.write("hello", 5); },
+    auto [rr, ww] = gen();
+    auto r = move(rr);
+    auto w = move(ww);
+    fork_run([&w] { [[maybe_unused]] auto res = w.write("hello", 5); },
              [&r] {
                  char buf[32] = {0};
                  auto res = r.read(buf, 32);
@@ -66,6 +68,40 @@ void ex_mqueue()
     mq_unlink("/.mqueue");
     printf("mque: ");
     c2p([] { return make_pair(mqueue("/.mqueue", 1, 32), mqueue("/.mqueue", 1, 32)); });
+}
+
+void ex_unixsocket()
+{
+    printf("unix: ");
+
+    static const string sockname = "unsock";
+    c2p([] {
+        auto r = unixsocket::server(sockname);
+        auto w = unixsocket(sockname);
+        return make_pair(move(r), move(w));
+    });
+
+    tbd::eventfd evfd;
+    fork_run(
+        [&] {
+            unixsocket cli;
+            evfd.read();
+            cli.sendto("HELLO", 5, sockname);
+            char buf[8] = {0};
+            auto [_, peer] = cli.recvfrom(buf, 8);
+            // printf("unix: cli.recvfrom \"%s\", from %s\n", buf, peer.name().c_str());
+            assert(peer.name() == sockname);
+            assert(string(buf) == "WORLD");
+        },
+        [&] {
+            auto srv = unixsocket::server(sockname);
+            evfd.write();
+            char buf[8] = {0};
+            auto [_, peer] = srv.recvfrom(buf, 8);
+            // printf("unix: srv.recvfrom \"%s\", from %s\n", buf, peer.name().c_str());
+            assert(string(buf) == "HELLO");
+            srv.sendto("WORLD", 5, peer);
+        });
 }
 
 void ex_epoll()
@@ -191,6 +227,7 @@ int main()
     ex_sockpair();
     ex_fifo();
     ex_mqueue();
+    ex_unixsocket();
 
     // event notifying
     ex_epoll();
