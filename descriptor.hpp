@@ -10,16 +10,19 @@
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
+#include <charconv>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
@@ -403,6 +406,191 @@ class mqueue : public descriptor
             ::mq_unlink(name_.c_str());
             name_.clear();
         }
+    }
+};
+
+class unixsocket : public descriptor
+{
+    using addrptr_t = struct sockaddr*;
+    struct anon_addr_tag
+    {};
+
+  public:
+    class address
+    {
+        struct sockaddr_un addr_ = {};
+
+      public:
+        address() noexcept = default;
+        address(const std::string& name)
+        {
+            addr_.sun_family = AF_UNIX;
+            ::memcpy(&addr_.sun_path[1], name.c_str(), name.size() + 1);
+        }
+        address(const char* name)
+            : address(std::string(name))
+        {
+        }
+        address(const struct sockaddr_un& addr) noexcept
+            : addr_(addr)
+        {
+        }
+
+        const struct sockaddr_un* data() const noexcept
+        {
+            return &addr_;
+        }
+
+        bool empty() const noexcept
+        {
+            return addr_.sun_family == AF_UNSPEC;
+        }
+
+        void clear() noexcept
+        {
+            ::explicit_bzero(&addr_, sizeof(struct sockaddr_un));
+        }
+
+        std::string name() const
+        {
+            return std::string(&addr_.sun_path[1]);
+        }
+
+        bool operator==(const address& rhs) const noexcept
+        {
+            return ::memcmp(&addr_, &rhs.addr_, sizeof(struct sockaddr_un)) == 0;
+        }
+        bool operator!=(const address& rhs) const noexcept
+        {
+            return !(*this == rhs);
+        }
+
+        static constexpr size_t len() noexcept
+        {
+            return sizeof(struct sockaddr_un);
+        }
+
+        static address getrandom() noexcept
+        {
+            uint64_t rand;
+            [[maybe_unused]] auto _ = ::getrandom(&rand, sizeof(rand), GRND_NONBLOCK);
+            struct sockaddr_un addr = {};
+            addr.sun_family = AF_UNIX;
+            addr.sun_path[1] = '\\';
+            char* p = &addr.sun_path[2];
+            std::to_chars(p, p + sizeof(addr.sun_path) - 2, rand, 16);
+            return addr;
+        }
+    };
+
+    static unixsocket server(const std::string& name)
+    {
+        unixsocket sock(anon_addr_tag{});
+        sock.bind_(name);
+        return sock;
+    }
+
+    explicit unixsocket(const std::string& peer = "")
+        : descriptor(newsock())
+    {
+        bind_(address::getrandom());
+
+        if (!peer.empty()) {
+            address addr(peer);
+            if (auto err = connect_(addr); err != 0) {
+                detail::throw_syserr(err, "connect");
+            }
+            peer_ = addr;
+        }
+    }
+
+    unixsocket(unixsocket&& rhs) noexcept = default;
+    unixsocket& operator=(unixsocket&& rhs) noexcept = default;
+
+    address getsockname() const
+    {
+        address addr;
+        socklen_t len = addr.len();
+        if (::getsockname(*fd_, (addrptr_t)addr.data(), &len) < 0) {
+            detail::throw_syserr(errno, "getsockname");
+        }
+        return addr;
+    }
+
+    void disconnect()
+    {
+        if (!peer_.empty()) {
+            const auto& addr = getsockname();
+            fd_ = detail::fd_wrapper(newsock());
+            bind_(addr);
+            peer_.clear();
+        }
+    }
+
+    void connect(const address& peer)
+    {
+        disconnect();
+        if (auto err = connect_(peer); err != 0) {
+            detail::throw_syserr(err, "connect");
+        }
+        peer_ = peer;
+    }
+
+    io_result read(void* buffer, size_t size) const override
+    {
+        if (peer_.empty()) {
+            address addr;
+            socklen_t len = addr.len();
+            auto nrecv = ::recvfrom(*fd_, buffer, size, 0, (addrptr_t)addr.data(), &len);
+            if (nrecv < 0) {
+                return io_result{errno, nrecv};
+            }
+            if (auto err = connect_(addr); err != 0) {
+                return io_result{err, -1};
+            }
+            peer_ = addr;
+            return io_result{0, nrecv};
+        }
+        return descriptor::read(buffer, size);
+    }
+
+    std::pair<io_result, address> recvfrom(void* buffer, size_t size) const
+    {
+        address addr;
+        socklen_t len = addr.len();
+        auto nrecv = ::recvfrom(*fd_, buffer, size, 0, (addrptr_t)addr.data(), &len);
+        return {io_result{nrecv < 0 ? errno : 0, nrecv}, addr};
+    }
+
+    io_result sendto(const void* buffer, size_t size, const address& addr) const
+    {
+        auto nsend = ::sendto(*fd_, buffer, size, 0, (addrptr_t)addr.data(), addr.len());
+        return io_result{nsend < 0 ? errno : 0, nsend};
+    }
+
+  private:
+    mutable address peer_;
+
+    explicit unixsocket(const anon_addr_tag&)
+        : descriptor(newsock())
+    {
+    }
+
+    void bind_(const address& addr) const
+    {
+        if (::bind(*fd_, (addrptr_t)addr.data(), addr.len()) < 0) {
+            detail::throw_syserr(errno, "bind");
+        }
+    }
+
+    int connect_(const address& peer) const
+    {
+        return ::connect(*fd_, (addrptr_t)peer.data(), peer.len()) < 0 ? errno : 0;
+    }
+
+    static int newsock() noexcept
+    {
+        return ::socket(AF_UNIX, SOCK_DGRAM, 0);
     }
 };
 
