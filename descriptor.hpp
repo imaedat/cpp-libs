@@ -310,7 +310,7 @@ class fifo : public descriptor
   private:
     std::string path_;
 
-    void unlink_()
+    void unlink_() noexcept
     {
         if (!path_.empty()) {
             ::unlink(path_.c_str());
@@ -948,16 +948,13 @@ class inotify : public descriptor
 
     std::vector<event> read() const
     {
-        static constexpr size_t STRUCT_SIZE = sizeof(struct inotify_event);
-        static constexpr size_t EVENT_SIZE = STRUCT_SIZE + NAME_MAX + 1;
-
-        std::vector<uint8_t> buffer(EVENT_SIZE);
-        auto nread = (size_t)descriptor::read(buffer.data(), EVENT_SIZE);
+        alignas(alignof(struct inotify_event)) std::array<uint8_t, 8192> buffer;
+        auto nread = (size_t)descriptor::read(buffer.data(), buffer.size());
 
         std::vector<event> events;
-        auto* p = buffer.data();
         struct inotify_event* ev = nullptr;
-        for (; p < buffer.data() + nread; p += STRUCT_SIZE + ev->len) {
+        for (auto* p = buffer.data(); p < buffer.data() + nread;
+             p += sizeof(struct inotify_event) + ev->len) {
             ev = (struct inotify_event*)p;
             auto it = watches_.find(ev->wd);
             assert(it != watches_.end());
@@ -1041,13 +1038,13 @@ class memmap : public descriptor
         if (length_ == 0) {
             struct stat sb;
             if (::fstat(*fd_, &sb) < 0) {
-                throw std::system_error(errno, std::generic_category());
+                detail::throw_syserr(errno, "fstat");
             }
             length_ = sb.st_size;
         }
 
         if ((area_ = ::mmap(nullptr, length_, prot, flags, *fd_, 0)) == MAP_FAILED) {
-            throw std::system_error(errno, std::generic_category());
+            detail::throw_syserr(errno, "mmap");
         }
 
         if (prot == PROT_READ) {
@@ -1064,6 +1061,7 @@ class memmap : public descriptor
         if (area_) {
             ::munmap(area_, length_);
             area_ = nullptr;
+            length_ = 0;
         }
     }
 };
