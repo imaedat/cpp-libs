@@ -38,6 +38,10 @@ struct co_null_type
 
 template <typename T>
 inline constexpr bool always_false_v = false;
+
+#ifdef COROUTINE_USE_SETJMP
+inline std::mutex mtx_;
+#endif
 }  // namespace detail
 
 template <typename G = detail::co_null_type, typename A = detail::co_null_type>
@@ -265,9 +269,6 @@ class coroutine_env
     ucontext_t* uctx_ = nullptr;  // move safety
 #endif
     co_gen_type last_value_;
-#ifdef COROUTINE_USE_SETJMP
-    inline static std::mutex mtx_;
-#endif
 
   public:
     coroutine_env()
@@ -328,7 +329,7 @@ class coroutine_env
         }
 
 #ifdef COROUTINE_USE_SETJMP
-        std::lock_guard lk(mtx_);
+        std::lock_guard lk(detail::mtx_);
 
         if (::sigaltstack(&co.state_->ss_, nullptr) < 0) {
             throw std::system_error(errno, std::generic_category(), "coroutine_env: sigaltstack");

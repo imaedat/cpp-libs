@@ -20,10 +20,14 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cerrno>
 #include <charconv>
+#include <cstring>
+#include <string>
 #include <system_error>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -111,7 +115,7 @@ class io_result
 
   public:
     explicit io_result(int err = 0, ssize_t n = 0)
-        : ec_(err, std::generic_category())
+        : ec_(n < 0 ? err : 0, std::generic_category())
         , nbytes_(n)
     {
     }
@@ -176,28 +180,26 @@ class descriptor
 
     int set_nonblock(bool set = true) const
     {
-        int old_flags = ::fcntl(*fd_, F_GETFL);
-        if (old_flags < 0) {
-            detail::throw_syserr(errno, "fcntl");
+        int oldflag = fcntl(F_GETFL);
+        if ((set && !(oldflag & O_NONBLOCK)) || (!set && (oldflag & O_NONBLOCK))) {
+            fcntl(F_SETFL, (set ? (oldflag | O_NONBLOCK) : (oldflag & ~O_NONBLOCK)));
         }
-
-        if ((set && !(old_flags & O_NONBLOCK)) || (!set && (old_flags & O_NONBLOCK))) {
-            if (::fcntl(*fd_, F_SETFL,
-                        (set ? (old_flags | O_NONBLOCK) : (old_flags & ~O_NONBLOCK))) < 0) {
-                detail::throw_syserr(errno, "fcntl");
-            }
-        }
-
-        return old_flags;
+        return oldflag;
     }
 
     bool is_nonblock() const
     {
-        int flags = ::fcntl(*fd_, F_GETFL);
-        if (flags < 0) {
+        return !!(fcntl(F_GETFL) & O_NONBLOCK);
+    }
+
+    template <typename... Args>
+    int fcntl(Args&&... args) const
+    {
+        int ret = ::fcntl(*fd_, args...);
+        if (ret < 0) {
             detail::throw_syserr(errno, "fcntl");
         }
-        return !!(flags & O_NONBLOCK);
+        return ret;
     }
 
     bool wait_readable(int timeout_ms = -1) const
@@ -424,6 +426,9 @@ class unixsocket : public descriptor
         address() noexcept = default;
         address(const std::string& name)
         {
+            if (name.size() + 2 > sizeof(addr_.sun_path)) {
+                detail::throw_syserr(EINVAL);
+            }
             addr_.sun_family = AF_UNIX;
             ::memcpy(&addr_.sun_path[1], name.c_str(), name.size() + 1);
         }
@@ -806,7 +811,7 @@ class eventfd : public descriptor
     uint64_t read() const
     {
         uint64_t value = 0;
-        if (auto res = descriptor::read(&value, sizeof(value)); !res) {
+        if (auto res = descriptor::read(&value, sizeof(value)); !res && !res.would_block()) {
             detail::throw_syserr(res.code(), "read");
         }
         return value;
@@ -814,7 +819,7 @@ class eventfd : public descriptor
 
     void write(uint64_t value = 1) const
     {
-        if (auto res = descriptor::write(&value, sizeof(value)); !res) {
+        if (auto res = descriptor::write(&value, sizeof(value)); !res && !res.would_block()) {
             detail::throw_syserr(res.code(), "write");
         }
     }
@@ -842,7 +847,9 @@ class signalfd : public descriptor
     int get_last_signal() const
     {
         struct signalfd_siginfo siginfo = {};
-        read(&siginfo, sizeof(siginfo));
+        if (auto res = read(&siginfo, sizeof(siginfo)); !res && !res.would_block()) {
+            detail::throw_syserr(res.code(), "read");
+        }
         return siginfo.ssi_signo;
     }
 
@@ -899,7 +906,9 @@ class timerfd : public descriptor
     uint64_t read() const
     {
         uint64_t count = 0;
-        descriptor::read(&count, sizeof(count));
+        if (auto res = descriptor::read(&count, sizeof(count)); !res && !res.would_block()) {
+            detail::throw_syserr(errno, "read");
+        }
         return count;
     }
 
@@ -949,11 +958,14 @@ class inotify : public descriptor
     std::vector<event> read() const
     {
         alignas(alignof(struct inotify_event)) std::array<uint8_t, 8192> buffer;
-        auto nread = (size_t)descriptor::read(buffer.data(), buffer.size());
+        auto res = descriptor::read(buffer.data(), buffer.size());
+        if (!res && !res.would_block()) {
+            detail::throw_syserr(res.code(), "read");
+        }
 
         std::vector<event> events;
         struct inotify_event* ev = nullptr;
-        for (auto* p = buffer.data(); p < buffer.data() + nread;
+        for (auto* p = buffer.data(); p < buffer.data() + res.nbytes();
              p += sizeof(struct inotify_event) + ev->len) {
             ev = (struct inotify_event*)p;
             auto it = watches_.find(ev->wd);
