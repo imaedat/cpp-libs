@@ -828,16 +828,36 @@ class eventfd : public descriptor
 class signalfd : public descriptor
 {
   public:
-    explicit signalfd(const std::vector<int>& signals, bool block_on_ctor = true)
+    enum class blocks
     {
-        sigset_t mask;
-        ::sigemptyset(&mask);
-        for (auto sig : signals) {
-            ::sigaddset(&mask, sig);
+        none = 0,
+        list,
+        all,
+    };
+
+    explicit signalfd(const std::vector<int>& signals, blocks blk = blocks::list)
+    {
+        bool do_block = true;
+        sigset_t set;
+        switch (blk) {
+        case blocks::list:
+            ::sigemptyset(&set);
+            std::for_each(signals.begin(), signals.end(), [&](auto s) { ::sigaddset(&set, s); });
+            break;
+        case blocks::all:
+            ::sigfillset(&set);
+            break;
+        default:
+            do_block = false;
+            break;
         }
-        if (block_on_ctor && ::pthread_sigmask(SIG_BLOCK, &mask, nullptr) < 0) {
+        if (do_block && ::pthread_sigmask(SIG_BLOCK, &set, nullptr) < 0) {
             detail::throw_syserr(errno, "pthread_sigmask");
         }
+
+        sigset_t mask;
+        ::sigemptyset(&mask);
+        std::for_each(signals.begin(), signals.end(), [&](auto s) { ::sigaddset(&mask, s); });
         fd_ = detail::fd_wrapper(::signalfd(-1, &mask, 0));
     }
 
