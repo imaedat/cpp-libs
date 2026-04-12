@@ -168,14 +168,29 @@ class descriptor
         fd_.close();
     }
 
-    int handle() const noexcept
+    explicit operator bool() const noexcept
     {
-        return (int)fd_;
+        return static_cast<bool>(fd_);
     }
 
     int operator*() const noexcept
     {
-        return (int)fd_;
+        return static_cast<int>(fd_);
+    }
+
+    int handle() const noexcept
+    {
+        return *fd_;
+    }
+
+    template <typename... Args>
+    int fcntl(Args&&... args) const
+    {
+        int ret = ::fcntl(*fd_, args...);
+        if (ret < 0) {
+            detail::throw_syserr(errno, "fcntl");
+        }
+        return ret;
     }
 
     int set_nonblock(bool set = true) const
@@ -190,48 +205,6 @@ class descriptor
     bool is_nonblock() const
     {
         return !!(fcntl(F_GETFL) & O_NONBLOCK);
-    }
-
-    template <typename... Args>
-    int fcntl(Args&&... args) const
-    {
-        int ret = ::fcntl(*fd_, args...);
-        if (ret < 0) {
-            detail::throw_syserr(errno, "fcntl");
-        }
-        return ret;
-    }
-
-    bool wait_readable(int timeout_ms = -1) const
-    {
-        return poll_(POLLIN | POLLRDHUP, timeout_ms);
-    }
-
-    bool is_readable() const
-    {
-        return wait_readable(0);
-    }
-
-    bool wait_writable(int timeout_ms = -1) const
-    {
-        return poll_(POLLOUT, timeout_ms);
-    }
-
-    bool is_writable() const
-    {
-        return wait_writable(0);
-    }
-
-    virtual io_result read(void* buffer, size_t size) const
-    {
-        auto nread = ::read(*fd_, buffer, size);
-        return io_result{nread < 0 ? errno : 0, nread};
-    }
-
-    virtual io_result write(const void* buffer, size_t size) const
-    {
-        auto nwritten = ::write(*fd_, buffer, size);
-        return io_result{nwritten < 0 ? errno : 0, nwritten};
     }
 
   protected:
@@ -253,29 +226,131 @@ class descriptor
     }
 };
 
+class reader : virtual public descriptor
+{
+  public:
+    explicit reader(int fd)
+        : descriptor(fd)
+    {
+    }
+    reader(reader&& rhs) noexcept = default;
+    reader& operator=(reader&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            descriptor::operator=(std::move(rhs));
+        }
+        return *this;
+    }
+
+    bool wait_readable(int timeout_ms = -1) const
+    {
+        return poll_(POLLIN | POLLRDHUP, timeout_ms);
+    }
+
+    bool is_readable() const
+    {
+        return wait_readable(0);
+    }
+
+    virtual io_result read(void* buffer, size_t size) const
+    {
+        auto nread = ::read(*fd_, buffer, size);
+        return io_result{nread < 0 ? errno : 0, nread};
+    }
+
+  protected:
+    reader() = default;
+};
+
+class writer : virtual public descriptor
+{
+  public:
+    explicit writer(int fd)
+        : descriptor(fd)
+    {
+    }
+    writer(writer&& rhs) noexcept = default;
+    writer& operator=(writer&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            descriptor::operator=(std::move(rhs));
+        }
+        return *this;
+    }
+
+    bool wait_writable(int timeout_ms = -1) const
+    {
+        return poll_(POLLOUT, timeout_ms);
+    }
+
+    bool is_writable() const
+    {
+        return wait_writable(0);
+    }
+
+    virtual io_result write(const void* buffer, size_t size) const
+    {
+        auto nwritten = ::write(*fd_, buffer, size);
+        return io_result{nwritten < 0 ? errno : 0, nwritten};
+    }
+
+  protected:
+    writer() = default;
+};
+
+class readwriter
+    : public reader
+    , public writer
+{
+  public:
+    explicit readwriter(int fd)
+        : descriptor(fd)
+        , reader(fd)
+        , writer(fd)
+    {
+    }
+    readwriter(readwriter&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , reader(std::move(rhs))
+        , writer(std::move(rhs))
+    {
+    }
+    readwriter& operator=(readwriter&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            descriptor::operator=(std::move(rhs));
+            // reader::operator=(std::move(rhs));
+            // writer::operator=(std::move(rhs));
+        }
+        return *this;
+    }
+
+  protected:
+    readwriter() = default;
+};
+
 /****************************************************************************
  * communication channels
  */
-inline std::pair<descriptor, descriptor> make_pipe()
+inline std::pair<reader, writer> make_pipe()
 {
     int fds[2];
     if (::pipe(fds) < 0) {
         detail::throw_syserr(errno, "pipe");
     }
-    // { reader, writer }
-    return {descriptor(fds[0]), descriptor(fds[1])};
+    return {reader(fds[0]), writer(fds[1])};
 }
 
-inline std::pair<descriptor, descriptor> make_socketpair()
+inline std::pair<readwriter, readwriter> make_socketpair()
 {
     int sv[2];
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
         detail::throw_syserr(errno, "socketpair");
     }
-    return {descriptor(sv[0]), descriptor(sv[1])};
+    return {readwriter(sv[0]), readwriter(sv[1])};
 }
 
-class fifo : public descriptor
+class fifo : public readwriter
 {
   public:
     explicit fifo(std::string_view path, int open_flag = O_RDONLY | O_NONBLOCK)
@@ -291,6 +366,7 @@ class fifo : public descriptor
 
     fifo(fifo&& rhs) noexcept
         : descriptor(std::move(rhs))
+        , readwriter(std::move(rhs))
         , path_(std::exchange(rhs.path_, ""))
     {
     }
@@ -298,7 +374,7 @@ class fifo : public descriptor
     {
         if (this != &rhs) {
             unlink_();
-            descriptor::operator=(std::move(rhs));
+            readwriter::operator=(std::move(rhs));
             path_ = std::exchange(rhs.path_, "");
         }
         return *this;
@@ -321,11 +397,11 @@ class fifo : public descriptor
     }
 };
 
-class mqueue : public descriptor
+class mqueue : public readwriter
 {
   public:
     explicit mqueue(std::string_view name)
-        : descriptor(::mq_open(name.data(), O_RDWR | O_CREAT, 0666, nullptr))
+        : readwriter(::mq_open(name.data(), O_RDWR | O_CREAT, 0666, nullptr))
         , name_(name)
     {
         if (::mq_getattr(*fd_, &attr_) < 0) {
@@ -346,6 +422,7 @@ class mqueue : public descriptor
 
     mqueue(mqueue&& rhs) noexcept
         : descriptor(std::move(rhs))
+        , readwriter(std::move(rhs))
         , name_(std::exchange(rhs.name_, ""))
         , attr_(std::exchange(rhs.attr_, {}))
     {
@@ -354,7 +431,7 @@ class mqueue : public descriptor
     {
         if (this != &rhs) {
             unlink_();
-            descriptor::operator=(std::move(rhs));
+            readwriter::operator=(std::move(rhs));
             name_ = std::exchange(rhs.name_, "");
             attr_ = std::exchange(rhs.attr_, {});
         }
@@ -411,7 +488,7 @@ class mqueue : public descriptor
     }
 };
 
-class unixsocket : public descriptor
+class unixsocket : public readwriter
 {
     using addrptr_t = struct sockaddr*;
     struct anon_addr_tag
@@ -439,6 +516,22 @@ class unixsocket : public descriptor
         address(const struct sockaddr_un& addr) noexcept
             : addr_(addr)
         {
+        }
+        address(const address&) = default;
+        address& operator=(const address&) = default;
+        address(address&& rhs) noexcept
+            : addr_(rhs.addr_)
+        {
+            rhs.clear();
+        }
+        address& operator=(address&& rhs) noexcept
+        {
+            if (this != &rhs) {
+                clear();
+                addr_ = rhs.addr_;
+                rhs.clear();
+            }
+            return *this;
         }
 
         const struct sockaddr_un* data() const noexcept
@@ -505,12 +598,24 @@ class unixsocket : public descriptor
             if (auto err = connect_(addr); err != 0) {
                 detail::throw_syserr(err, "connect");
             }
-            peer_ = addr;
+            peer_ = std::move(addr);
         }
     }
 
-    unixsocket(unixsocket&& rhs) noexcept = default;
-    unixsocket& operator=(unixsocket&& rhs) noexcept = default;
+    unixsocket(unixsocket&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , readwriter(std::move(rhs))
+        , peer_(std::move(rhs.peer_))
+    {
+    }
+    unixsocket& operator=(unixsocket&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            readwriter::operator=(std::move(rhs));
+            peer_ = std::move(rhs.peer_);
+        }
+        return *this;
+    }
 
     address getsockname() const
     {
@@ -556,7 +661,7 @@ class unixsocket : public descriptor
             peer_ = addr;
             return io_result{0, nrecv};
         }
-        return descriptor::read(buffer, size);
+        return reader::read(buffer, size);
     }
 
     std::pair<io_result, address> recvfrom(void* buffer, size_t size) const
@@ -695,7 +800,6 @@ class epollfd : public descriptor
     }
 
     io_result read(void*, size_t) = delete;
-    io_result write(const void*, size_t) = delete;
 
   private:
     size_t nregistered_ = 0;
@@ -795,7 +899,7 @@ class poll
     std::unordered_map<int, short> watchees_;
 };
 
-class eventfd : public descriptor
+class eventfd : public readwriter
 {
   public:
     static constexpr uint64_t EFD_MAX_VALUE = 0xfffffffffffffffe;
@@ -805,13 +909,17 @@ class eventfd : public descriptor
     {
     }
 
-    eventfd(eventfd&&) noexcept = default;
-    eventfd& operator=(eventfd&&) noexcept = default;
+    eventfd(eventfd&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , readwriter(std::move(rhs))
+    {
+    }
+    eventfd& operator=(eventfd&& rhs) noexcept = default;
 
     uint64_t read() const
     {
         uint64_t value = 0;
-        if (auto res = descriptor::read(&value, sizeof(value)); !res && !res.would_block()) {
+        if (auto res = reader::read(&value, sizeof(value)); !res && !res.would_block()) {
             detail::throw_syserr(res.code(), "read");
         }
         return value;
@@ -819,13 +927,13 @@ class eventfd : public descriptor
 
     void write(uint64_t value = 1) const
     {
-        if (auto res = descriptor::write(&value, sizeof(value)); !res && !res.would_block()) {
+        if (auto res = writer::write(&value, sizeof(value)); !res && !res.would_block()) {
             detail::throw_syserr(res.code(), "write");
         }
     }
 };
 
-class signalfd : public descriptor
+class signalfd : public reader
 {
   public:
     enum class blocks
@@ -861,7 +969,11 @@ class signalfd : public descriptor
         fd_ = detail::fd_wrapper(::signalfd(-1, &mask, 0));
     }
 
-    signalfd(signalfd&&) noexcept = default;
+    signalfd(signalfd&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , reader(std::move(rhs))
+    {
+    }
     signalfd& operator=(signalfd&&) noexcept = default;
 
     int get_last_signal() const
@@ -872,11 +984,9 @@ class signalfd : public descriptor
         }
         return siginfo.ssi_signo;
     }
-
-    io_result write(const void*, size_t) = delete;
 };
 
-class timerfd : public descriptor
+class timerfd : public reader
 {
   public:
     timerfd()
@@ -890,7 +1000,11 @@ class timerfd : public descriptor
         settime(after_ms);
     }
 
-    timerfd(timerfd&&) noexcept = default;
+    timerfd(timerfd&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , reader(std::move(rhs))
+    {
+    }
     timerfd& operator=(timerfd&&) noexcept = default;
 
     void settime(long after_ms, bool cyclic = false) const
@@ -926,16 +1040,14 @@ class timerfd : public descriptor
     uint64_t read() const
     {
         uint64_t count = 0;
-        if (auto res = descriptor::read(&count, sizeof(count)); !res && !res.would_block()) {
+        if (auto res = reader::read(&count, sizeof(count)); !res && !res.would_block()) {
             detail::throw_syserr(errno, "read");
         }
         return count;
     }
-
-    io_result write(const void*, size_t) = delete;
 };
 
-class inotify : public descriptor
+class inotify : public reader
 {
   public:
     inotify()
@@ -943,8 +1055,13 @@ class inotify : public descriptor
     {
     }
 
-    inotify(inotify&&) noexcept = default;
-    inotify& operator=(inotify&&) noexcept = default;
+    inotify(inotify&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , reader(std::move(rhs))
+        , watches_(std::exchange(rhs.watches_, {}))
+    {
+    }
+    inotify& operator=(inotify&& rhs) noexcept = default;
 
     void add_watch(std::string_view path, uint32_t mask)
     {
@@ -978,7 +1095,7 @@ class inotify : public descriptor
     std::vector<event> read() const
     {
         alignas(alignof(struct inotify_event)) std::array<uint8_t, 8192> buffer;
-        auto res = descriptor::read(buffer.data(), buffer.size());
+        auto res = reader::read(buffer.data(), buffer.size());
         if (!res && !res.would_block()) {
             detail::throw_syserr(res.code(), "read");
         }
@@ -1000,8 +1117,6 @@ class inotify : public descriptor
         return events;
     }
 
-    io_result write(const void*, size_t) = delete;
-
   private:
     std::unordered_map<int, std::string> watches_;
 };
@@ -1009,7 +1124,7 @@ class inotify : public descriptor
 /****************************************************************************
  * memory io
  */
-class memfd : public descriptor
+class memfd : public readwriter
 {
   public:
     explicit memfd(std::string_view name)
@@ -1017,11 +1132,15 @@ class memfd : public descriptor
     {
     }
 
-    memfd(memfd&&) noexcept = default;
-    memfd& operator=(memfd&&) noexcept = default;
+    memfd(memfd&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , readwriter(std::move(rhs))
+    {
+    }
+    memfd& operator=(memfd&& rhs) noexcept = default;
 };
 
-class memmap : public descriptor
+class memmap : public readwriter
 {
   public:
     explicit memmap(std::string_view filename, size_t length = 0, int prot = PROT_READ,
@@ -1032,6 +1151,7 @@ class memmap : public descriptor
 
     memmap(memmap&& rhs) noexcept
         : descriptor(std::move(rhs))
+        , readwriter(std::move(rhs))
         , length_(std::exchange(rhs.length_, 0))
         , area_(std::exchange(rhs.area_, nullptr))
     {
@@ -1040,7 +1160,7 @@ class memmap : public descriptor
     {
         if (this != &rhs) {
             unmap_();
-            descriptor::operator=(std::move(rhs));
+            readwriter::operator=(std::move(rhs));
             length_ = std::exchange(rhs.length_, 0);
             area_ = std::exchange(rhs.area_, nullptr);
         }
@@ -1104,13 +1224,15 @@ class shmem : public memmap
 
   public:
     explicit shmem(std::string_view name, size_t length = LENGTH, int oflag = O_RDWR | O_CREAT)
-        : memmap(shmem_init(name, length, oflag), length, PROT_READ | PROT_WRITE, MAP_SHARED)
+        : descriptor(shmem_init(name, length, oflag))
+        , memmap(/* dummy*/ -1, length, PROT_READ | PROT_WRITE, MAP_SHARED)
         , name_(name)
     {
     }
 
     shmem(shmem&& rhs) noexcept
-        : memmap(std::move(rhs))
+        : descriptor(std::move(rhs))
+        , memmap(std::move(rhs))
         , name_(std::exchange(rhs.name_, ""))
     {
     }

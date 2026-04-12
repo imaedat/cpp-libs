@@ -27,17 +27,23 @@ void fork_run(C&& c, P&& p)
 template <typename F>
 void c2p(F&& gen)
 {
-    auto [rr, ww] = gen();
-    auto r = move(rr);
-    auto w = move(ww);
-    fork_run([&w] { [[maybe_unused]] auto res = w.write("hello", 5); },
-             [&r] {
-                 char buf[32] = {0};
-                 auto res = r.read(buf, 32);
-                 assert(!!res);
-                 assert((int)res == 5);
-                 printf("read \"%s\"\n", buf);
-             });
+    auto [r, w] = gen();
+    auto rr = move(r);  // move ctor
+    auto ww = move(w);
+    r = move(rr);  // move assign
+    w = move(ww);
+    fork_run(
+        [&w] {
+            auto res = w.write("hello", 5);
+            assert(!!res);
+        },
+        [&r] {
+            char buf[32] = {0};
+            auto res = r.read(buf, 32);
+            assert(!!res);
+            assert((int)res == 5);
+            printf("read \"%s\"\n", buf);
+        });
 }
 
 void ex_pipe()
@@ -107,6 +113,8 @@ void ex_unixsocket()
 void ex_epoll()
 {
     tbd::epollfd epfd;
+    auto e = move(epfd);
+    epfd = move(e);
     tbd::timerfd timfd(100);
     epfd.add(timfd);
     auto ev = epfd.wait();
@@ -117,6 +125,8 @@ void ex_epoll()
 void ex_poll()
 {
     tbd::poll poll;
+    auto p = move(poll);
+    poll = move(p);
     tbd::timerfd timfd(100);
     poll.add(timfd);
     auto ev = poll.wait();
@@ -127,13 +137,10 @@ void ex_poll()
 void ex_eventfd()
 {
     tbd::eventfd evfd;
+    auto e = move(evfd);
+    evfd = move(e);
     evfd.set_nonblock();
-    try {
-        evfd.read();
-        assert(false);
-    } catch (const system_error& e) {
-        assert(e.code().value() == EAGAIN);
-    }
+    assert(evfd.read() == 0);
     evfd.write(42);
     assert(evfd.read() == 42);
 }
@@ -141,6 +148,8 @@ void ex_eventfd()
 void ex_signalfd()
 {
     tbd::signalfd sigfd({SIGUSR1});
+    auto s = move(sigfd);
+    sigfd = move(s);
     fork_run([&] { kill(getppid(), SIGUSR1); },  //
              [&] { assert(sigfd.get_last_signal() == SIGUSR1); });
 }
@@ -148,13 +157,18 @@ void ex_signalfd()
 void ex_timerfd()
 {
     tbd::timerfd timfd(100);
+    auto t = move(timfd);
+    timfd = move(t);
     assert(timfd.read() == 1);
 }
 
 void ex_inotify()
 {
+    [[maybe_unused]] int r0 = system("rm -f .hello");
     inotify infd;
     infd.add_watch(".", IN_CREATE);
+    auto i = move(infd);
+    infd = move(i);
     [[maybe_unused]] int r1 = system("touch .hello");
     try {
         auto evs = infd.read();
@@ -170,6 +184,8 @@ void ex_inotify()
 void ex_memfd()
 {
     tbd::memfd memfd("./memfd_demo");
+    auto m = move(memfd);
+    memfd = move(m);
     tbd::eventfd evfd;
     fork_run(
         [&] {
@@ -208,11 +224,15 @@ void ex_shmem()
     fork_run(
         [&] {
             tbd::shmem shm(name);
+            auto s = move(shm);
+            shm = move(s);
             memcpy(shm.data(), "hello", 5);
             evfd.write();
         },
         [&] {
             tbd::shmem shm(name);
+            auto s = move(shm);
+            shm = move(s);
             (void)evfd.read();
             char buf[8] = {0};
             shm.read(buf, 8);
