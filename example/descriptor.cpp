@@ -1,6 +1,7 @@
 #include "descriptor.hpp"
 
 #include <assert.h>
+#include <netinet/ip.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -108,6 +109,44 @@ void ex_unixsocket()
             assert(string(buf) == "HELLO");
             srv.sendto("WORLD", 5, peer);
         });
+}
+
+void make_tun()
+{
+    [[maybe_unused]] int r = system("rm -f .tun-ok");
+    tun_device tun("tun42", "10.0.0.1", "255.255.255.0");
+    auto t = move(tun);
+    tun = move(t);
+    tun.up();
+    r = system("touch .tun-ok");
+
+    char buf[1024];
+    while (true) {
+        auto res = tun.read(buf, 1024);
+        if (!res)
+            break;
+        auto* iphdr = (struct iphdr*)buf;
+        if (iphdr->protocol == IPPROTO_ICMP) {
+            printf("tund: read %lu bytes\n", res.nbytes());
+            break;
+        }
+    }
+
+    r = system("rm -f .tun-ok");
+}
+
+void ex_tundevice()
+{
+    tbd::eventfd evfd;
+    fork_run([&] { [[maybe_unused]] int r = system("sudo ./descriptor make-tun"); },  //
+             [&] {
+                 inotify infd;
+                 infd.add_watch(".", IN_CREATE);
+                 (void)infd.read();
+
+                 // [[maybe_unused]] int r1 = system("ip link show type tun");
+                 [[maybe_unused]] int r2 = system("ping -c 1 -w 1 10.0.0.2 >/dev/null 2>&1");
+             });
 }
 
 void ex_epoll()
@@ -240,14 +279,20 @@ void ex_shmem()
         });
 }
 
-int main()
+int main(int argc, char* argv[])
 {
+    if (argc > 1 && strcmp(argv[1], "make-tun") == 0) {
+        make_tun();
+        return 0;
+    }
+
     // communication channels
     ex_pipe();
     ex_sockpair();
     ex_fifo();
     ex_mqueue();
     ex_unixsocket();
+    ex_tundevice();
 
     // event notifying
     ex_epoll();

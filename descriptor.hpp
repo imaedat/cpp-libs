@@ -18,6 +18,11 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
+//
+#include <arpa/inet.h>
+#include <linux/if.h>
+#include <linux/if_tun.h>
+#include <sys/ioctl.h>
 
 #include <algorithm>
 #include <array>
@@ -205,6 +210,16 @@ class descriptor
     bool is_nonblock() const
     {
         return !!(fcntl(F_GETFL) & O_NONBLOCK);
+    }
+
+    template <typename... Args>
+    int ioctl(Args&&... args) const
+    {
+        int ret = ::ioctl(*fd_, args...);
+        if (ret < 0) {
+            detail::throw_syserr(errno, "ioctl");
+        }
+        return ret;
     }
 
   protected:
@@ -702,6 +717,84 @@ class unixsocket : public readwriter
     {
         return ::socket(AF_UNIX, SOCK_DGRAM, 0);
     }
+};
+
+class tun_device : public readwriter
+{
+  public:
+    tun_device(std::string_view name, std::string_view addr, std::string_view mask, int mtu = 0)
+        : descriptor(::open("/dev/net/tun", O_RDWR))
+        , ifr_({})
+        , sock_(::socket(AF_INET, SOCK_DGRAM, 0))
+    {
+        ifr_.ifr_flags = IFF_TUN | IFF_NO_PI;
+        ::strncpy(ifr_.ifr_name, name.data(), IFNAMSIZ - 1);
+        if (::ioctl(*fd_, TUNSETIFF, &ifr_) < 0) {
+            detail::throw_syserr(errno, "ioctl");
+        }
+
+        ::memset(&ifr_.ifr_ifru, 0, sizeof(ifr_.ifr_ifru));
+        auto* sockaddr = (struct sockaddr_in*)&ifr_.ifr_addr;
+        sockaddr->sin_family = AF_INET;
+        ::inet_pton(AF_INET, addr.data(), &sockaddr->sin_addr);
+        sock_.ioctl(SIOCSIFADDR, &ifr_);
+
+        // ::memset(&ifr_.ifr_ifru, 0, sizeof(ifr_.ifr_ifru));
+        sockaddr = (struct sockaddr_in*)&ifr_.ifr_netmask;
+        // sockaddr->sin_family = AF_INET;
+        ::inet_pton(AF_INET, mask.data(), &sockaddr->sin_addr);
+        sock_.ioctl(SIOCSIFNETMASK, &ifr_);
+
+        if (mtu > 0) {
+            // ::memset(&ifr_.ifr_ifru, 0, sizeof(ifr_.ifr_ifru));
+            ifr_.ifr_mtu = mtu;
+            sock_.ioctl(SIOCSIFMTU, &ifr_);
+        }
+
+        sock_.ioctl(SIOCGIFFLAGS, &ifr_);
+    }
+
+    tun_device(tun_device&& rhs) noexcept
+        : descriptor(std::move(rhs))
+        , readwriter(std::move(rhs))
+        , ifr_(std::exchange(rhs.ifr_, {}))
+        , sock_(std::move(rhs.sock_))
+    {
+    }
+    tun_device& operator=(tun_device&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            readwriter::operator=(std::move(rhs));
+            ifr_ = std::exchange(rhs.ifr_, {});
+            sock_ = std::move(rhs.sock_);
+        }
+        return *this;
+    }
+
+    std::string name() const noexcept
+    {
+        return ifr_.ifr_name;
+    }
+
+    void up()
+    {
+        ifr_.ifr_flags |= (IFF_UP | IFF_RUNNING);
+        sock_.ioctl(SIOCSIFFLAGS, &ifr_);
+        // int on = 1;
+        // ioctl(TUNSETCARRIER, &on);
+    }
+
+    void down()
+    {
+        ifr_.ifr_flags &= ~(IFF_UP | IFF_RUNNING);
+        sock_.ioctl(SIOCSIFFLAGS, &ifr_);
+        // int on = 0;
+        // ioctl(TUNSETCARRIER, &on);
+    }
+
+  private:
+    struct ifreq ifr_ = {};
+    descriptor sock_;
 };
 
 /****************************************************************************
