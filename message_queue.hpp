@@ -1,12 +1,12 @@
 #ifndef MESSAGE_QUEUE_HPP_
 #define MESSAGE_QUEUE_HPP_
 
-#include <assert.h>
 #include <errno.h>
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include <cassert>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -67,11 +67,11 @@ class message_queue
         return eventfd_;
     }
 
-    template <typename U, typename = std::enable_if_t<std::is_same_v<T, std::decay_t<U>>>>
+    template <typename U, std::enable_if_t<std::is_constructible_v<T, U>, bool> = true>
     void push(U&& msg)
     {
         std::lock_guard lk(*queue_mtx_);
-        mq_.push(std::forward<T>(msg));
+        mq_.push(std::forward<U>(msg));
         (void)::eventfd_write(eventfd_, 1);
     }
 
@@ -89,19 +89,18 @@ class message_queue
         using namespace std::chrono;
 
 #ifdef MESSAGE_QUEUE_MULTIPLE_READERS
-        auto t1 = steady_clock::now();
+        auto t = steady_clock::now();
         std::unique_lock lk(*reader_mtx_, std::defer_lock);
         if (!lk.try_lock_for(milliseconds(wait_ms))) {
             return std::nullopt;
         }
-        auto t2 = steady_clock::now();
-        auto elapsed = duration_cast<milliseconds>(t2 - t1).count();
+        auto elapsed = duration_cast<milliseconds>(steady_clock::now() - t).count();
         if (elapsed > 0) {
             wait_ms -= elapsed;
         }
 #endif
 
-        struct pollfd fds;
+        struct pollfd fds = {};
         fds.fd = eventfd_;
         fds.events = POLLIN | POLLPRI | POLLRDHUP;
         fds.revents = 0;
@@ -131,7 +130,9 @@ class message_queue
     T pop_()
     {
         eventfd_t value;
-        (void)::eventfd_read(eventfd_, &value);
+        if (::eventfd_read(eventfd_, &value) < 0) {
+            throw std::system_error(errno, std::generic_category(), "message_queue::pop: read");
+        }
 
         std::lock_guard lk(*queue_mtx_);
         assert(!mq_.empty());
