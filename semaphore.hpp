@@ -26,13 +26,18 @@ class semaphore
     semaphore(const semaphore&) = delete;
     semaphore& operator=(const semaphore&) = delete;
     semaphore(semaphore&&) noexcept = default;
-    semaphore& operator=(semaphore&&) noexcept = default;
+    semaphore& operator=(semaphore&& rhs) noexcept
+    {
+        if (this != &rhs) {
+            destroy_();
+            sem_ = std::move(rhs.sem_);
+        }
+        return *this;
+    }
 
     ~semaphore() noexcept
     {
-        if (sem_) {
-            ::sem_destroy(sem_.get());
-        }
+        destroy_();
     }
 
     void release()
@@ -82,6 +87,13 @@ class semaphore
 
   private:
     std::unique_ptr<sem_t> sem_;
+
+    void destroy_() noexcept
+    {
+        if (sem_) {
+            ::sem_destroy(sem_.get());
+        }
+    }
 };
 
 class parker
