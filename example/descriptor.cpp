@@ -42,14 +42,20 @@ void c2p(F&& gen)
     w = move(ww);
     fork_run(
         [&w] {
-            auto res = w.write("hello", 5);
-            assert(!!res);
+            auto res = w.writev({{(void*)"hello", 5}, {(void*)", world", 7}});
+            if (!res) {
+                if (VERBOSE) {
+                    printf("writev: %s\n", res.message().c_str());
+                }
+                auto res = w.write("hello", 5);
+                assert(!!res);
+            }
         },
         [&r] {
             char buf[32] = {0};
             auto res = r.read(buf, 32);
             assert(!!res);
-            assert((int)res == 5);
+            assert((int)res == 5 || (int)res == 12);
             printf("read \"%s\"\n", buf);
         });
 }
