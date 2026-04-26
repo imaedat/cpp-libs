@@ -1,27 +1,29 @@
 #define MESSAGE_QUEUE_MULTIPLE_READERS
 #include "message_queue.hpp"
 
+#include <unistd.h>
+
 #include <atomic>
 
+#include "logger.hpp"
+#include "semaphore.hpp"
 #include "thread_pool.hpp"
-#include "wait_group.hpp"
 
 using namespace std;
 using namespace std::chrono;
 using namespace tbd;
-
-#define msleep(ms) this_thread::sleep_for(milliseconds((ms)))
 
 struct non_copyable
 {
     int id;
     explicit non_copyable(int n)
         : id(n)
-    {}
+    {
+    }
     non_copyable(const non_copyable&) = delete;
     non_copyable& operator=(const non_copyable&) = delete;
-    non_copyable(non_copyable&&) = default;
-    non_copyable& operator=(non_copyable&&) = default;
+    non_copyable(non_copyable&&) noexcept = default;
+    non_copyable& operator=(non_copyable&&) noexcept = default;
 };
 
 int main()
@@ -31,47 +33,48 @@ int main()
 
     message_queue<non_copyable> mq;
 
-    thread_pool tpool(NWRITER + NREADER);
+    logger logger("mesgq", "/dev/stdout");
+    thread_pool thrpool(NWRITER + NREADER);
 
     srandom(time(nullptr));
 
     wait_group rwg(NREADER);
     atomic<bool> remains{true};
     for (size_t i = 0; i < NREADER; ++i) {
-        tpool.submit([i, &mq, &remains, &rwg] {
-            // printf("reader-%02lu: start\n", i);
+        thrpool.submit([i, &mq, &remains, &logger, &rwg] {
+            // logger.info("reader-%02lu: start", i);
 
             while (remains) {
                 auto m = mq.timed_pop(100);
                 if (m) {
-                    printf("reader-%02lu: pop %d\n", i, m->id);
+                    logger.info("reader-%02lu: pop %d", i, m->id);
                 } else {
-                    // printf("reader-%02lu: ... timed out\n", i);
+                    // logger.info("reader-%02lu: ... timed out", i);
                 }
             }
-            // printf("reader-%02lu: done\n", i);
+            // logger.info("reader-%02lu: done", i);
             rwg.done();
         });
     }
 
     wait_group wwg(NWRITER);
     for (size_t i = 0; i < NWRITER; ++i) {
-        tpool.submit([i, &mq, &wwg] {
+        thrpool.submit([i, &mq, &logger, &wwg] {
             auto ms = 1 + random() % 600;
-            printf("writer-%02lu: wait %ld ms ...\n", i, ms);
-            msleep(ms);
+            // logger.info("writer-%02lu: wait %ld ms ...", i, ms);
+            usleep(ms * 1000);
             non_copyable nc(i);
+            logger.info("writer-%02lu: push %lu", i, i);
             mq.push(move(nc));
-            // printf("writer-%02lu: done\n", i);
             wwg.done();
         });
     }
 
     wwg.wait();
-    puts("--- all writers done ---");
+    logger.info("--- all writers done ---");
     remains = false;
     rwg.wait();
-    puts("--- all readers done ---");
+    logger.info("--- all readers done ---");
 
     return 0;
 }
