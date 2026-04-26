@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
 //
@@ -306,6 +307,12 @@ class writer : virtual public descriptor
     virtual io_result write(const void* buffer, size_t size) const
     {
         auto nwritten = ::write(*fd_, buffer, size);
+        return io_result{nwritten < 0 ? errno : 0, nwritten};
+    }
+
+    io_result writev(const std::vector<struct iovec>& iov) const
+    {
+        auto nwritten = ::writev(*fd_, iov.data(), iov.size());
         return io_result{nwritten < 0 ? errno : 0, nwritten};
     }
 
