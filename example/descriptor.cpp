@@ -12,6 +12,13 @@ using namespace std;
 using namespace tbd;
 using namespace std::string_literals;
 
+#define DEFENV(var, init) static int var = (init)
+// clang-format off
+#define GETENV(var) if (auto *p = getenv(#var); p) { var = atoi(p); }
+// clang-format on
+
+DEFENV(VERBOSE, 0);
+
 template <typename C, typename P>
 void fork_run(C&& c, P&& p)
 {
@@ -77,38 +84,50 @@ void ex_mqueue()
     c2p([] { return make_pair(mqueue("/.mqueue", 1, 32), mqueue("/.mqueue", 1, 32)); });
 }
 
-void ex_unixsocket()
+void ex_dgramsocket_(int domain, const dgramsocket::address& srvaddr)
 {
-    printf("unix: ");
+    const char* sdom = domain == AF_UNIX ? "un" : "in";
+    printf("dg%s: ", sdom);
 
-    static const string sockname = "unsock";
-    c2p([] {
-        auto r = unixsocket::server(sockname);
-        auto w = unixsocket(sockname);
+    c2p([&] {
+        auto r = dgramsocket::server(srvaddr);
+        auto w = dgramsocket(srvaddr);
+        w.disconnect();
+        w.connect(srvaddr);
         return make_pair(move(r), move(w));
     });
 
     tbd::eventfd evfd;
     fork_run(
         [&] {
-            unixsocket cli;
+            dgramsocket cli(domain);
             evfd.read();
-            cli.sendto("HELLO", 5, sockname);
+            cli.sendto("HELLO", 5, srvaddr);
             char buf[8] = {0};
             auto [_, peer] = cli.recvfrom(buf, 8);
-            // printf("unix: cli.recvfrom \"%s\", from %s\n", buf, peer.name().c_str());
-            assert(peer.name() == sockname);
+            if (VERBOSE) {
+                printf("dg%s: cli.recvfrom \"%s\", from %s\n", sdom, buf, peer.name().c_str());
+            }
+            assert(peer == srvaddr);
             assert(string(buf) == "WORLD");
         },
         [&] {
-            auto srv = unixsocket::server(sockname);
+            auto srv = dgramsocket::server(srvaddr);
             evfd.write();
             char buf[8] = {0};
             auto [_, peer] = srv.recvfrom(buf, 8);
-            // printf("unix: srv.recvfrom \"%s\", from %s\n", buf, peer.name().c_str());
+            if (VERBOSE) {
+                printf("dg%s: srv.recvfrom \"%s\", from %s\n", sdom, buf, peer.name().c_str());
+            }
             assert(string(buf) == "HELLO");
             srv.sendto("WORLD", 5, peer);
         });
+}
+
+void ex_dgramsocket()
+{
+    ex_dgramsocket_(AF_UNIX, dgramsocket::address::af_unix("unsock"));
+    ex_dgramsocket_(AF_INET, dgramsocket::address::af_inet("127.0.0.1", 5555));
 }
 
 void make_tun()
@@ -127,7 +146,7 @@ void make_tun()
             break;
         auto* iphdr = (struct iphdr*)buf;
         if (iphdr->protocol == IPPROTO_ICMP) {
-            printf("tund: read %lu bytes\n", res.nbytes());
+            printf("\rtund: read %lu bytes\n", res.nbytes());
             break;
         }
     }
@@ -144,8 +163,11 @@ void ex_tundevice()
                  infd.add_watch(".", IN_CREATE);
                  (void)infd.read();
 
-                 // [[maybe_unused]] int r1 = system("ip link show type tun");
-                 [[maybe_unused]] int r2 = system("ping -c 1 -w 1 10.0.0.2 >/dev/null 2>&1");
+                 if (VERBOSE) {
+                     [[maybe_unused]] int r1 = system("ip link show type tun | head -n1");
+                 }
+                 [[maybe_unused]] int r2 =
+                     system("timeout 0.1 ping -c 1 -s 1024 10.0.0.2 >/dev/null 2>&1");
              });
 }
 
@@ -281,6 +303,8 @@ void ex_shmem()
 
 int main(int argc, char* argv[])
 {
+    GETENV(VERBOSE);
+
     if (argc > 1 && strcmp(argv[1], "make-tun") == 0) {
         make_tun();
         return 0;
@@ -291,7 +315,7 @@ int main(int argc, char* argv[])
     ex_sockpair();
     ex_fifo();
     ex_mqueue();
-    ex_unixsocket();
+    ex_dgramsocket();
     ex_tundevice();
 
     // event notifying
