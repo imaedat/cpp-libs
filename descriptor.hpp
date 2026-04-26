@@ -356,10 +356,10 @@ inline std::pair<reader, writer> make_pipe()
     return {reader(fds[0]), writer(fds[1])};
 }
 
-inline std::pair<readwriter, readwriter> make_socketpair()
+inline std::pair<readwriter, readwriter> make_socketpair(int type = SOCK_DGRAM)
 {
     int sv[2];
-    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+    if (::socketpair(AF_UNIX, type, 0, sv) < 0) {
         detail::throw_syserr(errno, "socketpair");
     }
     return {readwriter(sv[0]), readwriter(sv[1])};
@@ -503,127 +503,186 @@ class mqueue : public readwriter
     }
 };
 
-class unixsocket : public readwriter
+class dgramsocket : public readwriter
 {
-    using addrptr_t = struct sockaddr*;
-    struct anon_addr_tag
-    {};
-
   public:
     class address
     {
-        struct sockaddr_un addr_ = {};
+        friend class dgramsocket;
+        inline static constexpr size_t UNADDRSZ = sizeof(struct sockaddr_un);
+        inline static constexpr size_t INADDRSZ = sizeof(struct sockaddr_in);
+
+        uint8_t sockaddr_[std::max(UNADDRSZ, INADDRSZ)] = {};
+        size_t socklen_ = 0;
 
       public:
-        address() noexcept = default;
-        address(const std::string& name)
+        static address af_unix(const std::string& name = "")
         {
-            if (name.size() + 2 > sizeof(addr_.sun_path)) {
-                detail::throw_syserr(EINVAL);
+            static constexpr size_t SUNPATHSZ = sizeof(((struct sockaddr_un*)0)->sun_path);
+            if (name.size() + 2 > SUNPATHSZ) {
+                detail::throw_syserr(EINVAL, "af_unix");
             }
-            addr_.sun_family = AF_UNIX;
-            ::memcpy(&addr_.sun_path[1], name.c_str(), name.size() + 1);
+
+            address addr;
+            auto* un = (struct sockaddr_un*)addr.sockaddr_;
+            un->sun_family = AF_UNIX;
+            addr.socklen_ = offsetof(struct sockaddr_un, sun_path);
+            if (!name.empty()) {
+                ::memcpy(&un->sun_path[1], name.c_str(), name.size() + 1);
+                addr.socklen_ += 1 + name.size();
+            }
+            return addr;
         }
-        address(const char* name)
-            : address(std::string(name))
+
+        static address af_inet()
         {
+            address addr;
+            auto* in = (struct sockaddr_in*)addr.sockaddr_;
+            in->sin_family = AF_INET;
+            addr.socklen_ = INADDRSZ;
+            return addr;
         }
-        address(const struct sockaddr_un& addr) noexcept
-            : addr_(addr)
+
+        static address af_inet(const std::string& ipaddr, uint16_t port)
         {
+            address addr;
+            auto* in = (struct sockaddr_in*)addr.sockaddr_;
+            in->sin_family = AF_INET;
+            if (ipaddr.empty()) {
+                in->sin_addr.s_addr = INADDR_ANY;
+            } else if (::inet_pton(AF_INET, ipaddr.c_str(), &in->sin_addr) < 0) {
+                detail::throw_syserr(errno, "inet_pton");
+            }
+            in->sin_port = ::htons(port);
+            addr.socklen_ = INADDRSZ;
+            return addr;
         }
+
+        address() noexcept = default;
         address(const address&) = default;
         address& operator=(const address&) = default;
         address(address&& rhs) noexcept
-            : addr_(rhs.addr_)
+            : socklen_(rhs.socklen_)
         {
+            ::memcpy(data(), rhs.data(), sizeof(sockaddr_));
             rhs.clear();
         }
         address& operator=(address&& rhs) noexcept
         {
             if (this != &rhs) {
-                clear();
-                addr_ = rhs.addr_;
+                ::memcpy(data(), rhs.data(), sizeof(sockaddr_));
+                socklen_ = rhs.socklen_;
                 rhs.clear();
             }
             return *this;
         }
 
-        const struct sockaddr_un* data() const noexcept
+        int domain() const noexcept
         {
-            return &addr_;
+            return data()->sa_family;
         }
 
-        bool empty() const noexcept
+        size_t len() const noexcept
         {
-            return addr_.sun_family == AF_UNSPEC;
+            return empty() ? sizeof(sockaddr_) : socklen_;
         }
 
-        void clear() noexcept
+        struct sockaddr* data() noexcept
         {
-            ::explicit_bzero(&addr_, sizeof(struct sockaddr_un));
+            return (struct sockaddr*)sockaddr_;
         }
 
-        std::string name() const
+        const struct sockaddr* data() const noexcept
         {
-            return std::string(&addr_.sun_path[1]);
+            return (const struct sockaddr*)sockaddr_;
         }
 
         bool operator==(const address& rhs) const noexcept
         {
-            return ::memcmp(&addr_, &rhs.addr_, sizeof(struct sockaddr_un)) == 0;
+            return domain() == rhs.domain() && len() == rhs.len() &&
+                   ::memcmp(data(), rhs.data(), len()) == 0;
         }
+
         bool operator!=(const address& rhs) const noexcept
         {
             return !(*this == rhs);
         }
 
-        static constexpr size_t len() noexcept
+        explicit operator bool() const noexcept
         {
-            return sizeof(struct sockaddr_un);
+            return !empty();
         }
 
-        static address getrandom() noexcept
+        bool empty() const noexcept
         {
-            uint64_t rand;
-            [[maybe_unused]] auto _ = ::getrandom(&rand, sizeof(rand), GRND_NONBLOCK);
-            struct sockaddr_un addr = {};
-            addr.sun_family = AF_UNIX;
-            addr.sun_path[1] = '\\';
-            char* p = &addr.sun_path[2];
-            std::to_chars(p, p + sizeof(addr.sun_path) - 2, rand, 16);
-            return addr;
+            return domain() == 0;
         }
-    };
 
-    static unixsocket server(const std::string& name)
+        void clear() noexcept
+        {
+            ::explicit_bzero(data(), sizeof(sockaddr_));
+            socklen_ = 0;
+        }
+
+        std::string name() const
+        {
+            if (domain() == AF_UNIX) {
+                return &((struct sockaddr_un*)sockaddr_)->sun_path[1];
+
+            } else if (domain() == AF_INET) {
+                auto* in = (struct sockaddr_in*)sockaddr_;
+                return std::string(::inet_ntoa(in->sin_addr)) + ":" +
+                       std::to_string(::ntohs(in->sin_port));
+
+            } else {
+                return "";
+            }
+        }
+
+      private:
+        static address ephemeral(int domain)
+        {
+            return domain == AF_UNIX ? af_unix() : address{};
+        }
+    };  // address
+
+    static dgramsocket server(const address& addr)
     {
-        unixsocket sock(anon_addr_tag{});
-        sock.bind_(name);
-        return sock;
+        return dgramsocket(addr, true);
     }
 
-    explicit unixsocket(const std::string& peer = "")
-        : descriptor(newsock())
+    explicit dgramsocket(int domain)
+        : descriptor(newsock(domain))
     {
-        bind_(address::getrandom());
+        bind_(address::ephemeral(domain));
+    }
 
-        if (!peer.empty()) {
-            address addr(peer);
-            if (auto err = connect_(addr); err != 0) {
+    explicit dgramsocket(const address& addr, bool bind_this = false)
+        : descriptor(newsock(addr.domain()))
+    {
+        assert_address_valid(addr);
+
+        if (bind_this) {
+            bind_(addr);
+
+        } else {
+            bind_(address::ephemeral(addr.domain()));
+
+            address peer(addr);
+            if (auto err = connect_(peer); err != 0) {
                 detail::throw_syserr(err, "connect");
             }
-            peer_ = std::move(addr);
+            peer_ = std::move(peer);
         }
     }
 
-    unixsocket(unixsocket&& rhs) noexcept
+    dgramsocket(dgramsocket&& rhs) noexcept
         : descriptor(std::move(rhs))
         , readwriter(std::move(rhs))
         , peer_(std::move(rhs.peer_))
     {
     }
-    unixsocket& operator=(unixsocket&& rhs) noexcept
+    dgramsocket& operator=(dgramsocket&& rhs) noexcept
     {
         if (this != &rhs) {
             readwriter::operator=(std::move(rhs));
@@ -636,18 +695,19 @@ class unixsocket : public readwriter
     {
         address addr;
         socklen_t len = addr.len();
-        if (::getsockname(*fd_, (addrptr_t)addr.data(), &len) < 0) {
+        if (::getsockname(*fd_, addr.data(), &len) < 0) {
             detail::throw_syserr(errno, "getsockname");
         }
+        addr.socklen_ = len;
         return addr;
     }
 
     void disconnect()
     {
-        if (!peer_.empty()) {
-            const auto& addr = getsockname();
-            fd_ = detail::fd_wrapper(newsock());
-            bind_(addr);
+        if (peer_) {
+            if (auto err = connect_(address{}); err != 0) {
+                detail::throw_syserr(err, "connect");
+            }
             peer_.clear();
         }
     }
@@ -663,17 +723,18 @@ class unixsocket : public readwriter
 
     io_result read(void* buffer, size_t size) const override
     {
-        if (peer_.empty()) {
+        if (!peer_) {
             address addr;
             socklen_t len = addr.len();
-            auto nrecv = ::recvfrom(*fd_, buffer, size, 0, (addrptr_t)addr.data(), &len);
+            auto nrecv = ::recvfrom(*fd_, buffer, size, 0, addr.data(), &len);
+            addr.socklen_ = len;
             if (nrecv < 0) {
                 return io_result{errno, nrecv};
             }
             if (auto err = connect_(addr); err != 0) {
                 return io_result{err, -1};
             }
-            peer_ = addr;
+            peer_ = std::move(addr);
             return io_result{0, nrecv};
         }
         return reader::read(buffer, size);
@@ -683,39 +744,42 @@ class unixsocket : public readwriter
     {
         address addr;
         socklen_t len = addr.len();
-        auto nrecv = ::recvfrom(*fd_, buffer, size, 0, (addrptr_t)addr.data(), &len);
+        auto nrecv = ::recvfrom(*fd_, buffer, size, 0, addr.data(), &len);
+        addr.socklen_ = len;
         return {io_result{nrecv < 0 ? errno : 0, nrecv}, addr};
     }
 
     io_result sendto(const void* buffer, size_t size, const address& addr) const
     {
-        auto nsend = ::sendto(*fd_, buffer, size, 0, (addrptr_t)addr.data(), addr.len());
+        auto nsend = ::sendto(*fd_, buffer, size, 0, addr.data(), addr.len());
         return io_result{nsend < 0 ? errno : 0, nsend};
     }
 
   private:
     mutable address peer_;
 
-    explicit unixsocket(const anon_addr_tag&)
-        : descriptor(newsock())
-    {
-    }
-
     void bind_(const address& addr) const
     {
-        if (::bind(*fd_, (addrptr_t)addr.data(), addr.len()) < 0) {
+        if (addr && ::bind(*fd_, addr.data(), addr.len()) < 0) {
             detail::throw_syserr(errno, "bind");
         }
     }
 
     int connect_(const address& peer) const
     {
-        return ::connect(*fd_, (addrptr_t)peer.data(), peer.len()) < 0 ? errno : 0;
+        return ::connect(*fd_, peer.data(), peer.len()) < 0 ? errno : 0;
     }
 
-    static int newsock() noexcept
+    static int newsock(int domain) noexcept
     {
-        return ::socket(AF_UNIX, SOCK_DGRAM, 0);
+        return ::socket(domain, SOCK_DGRAM, 0);
+    }
+
+    static void assert_address_valid(const address& addr)
+    {
+        if (!addr) {
+            detail::throw_syserr(EINVAL, "dgramsocket");
+        }
     }
 };
 
