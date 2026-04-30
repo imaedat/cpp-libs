@@ -153,12 +153,13 @@ class mutex_wrap
 
     guard<> lock() && = delete;
 
-    template <typename F, std::enable_if_t<std::is_invocable_v<F, T&>, bool> = true>
-    void lock(F&& fn)
+    template <typename F, std::enable_if_t<std::is_invocable_v<F, T&>, bool> = true,
+              typename R = std::invoke_result_t<std::decay_t<F>, T&>>
+    R lock(F&& fn)
     {
         assert_mutex_alive();
-        std::lock_guard<M> lk(pin_->mtx_);
-        fn(pin_->data_);
+        std::lock_guard lk(pin_->mtx_);
+        return fn(pin_->data_);
     }
 
     M& native_mutex() &
@@ -199,8 +200,9 @@ class rwlock_wrap : public mutex_wrap<T, std::shared_mutex>
 
     shared_guard lock_shared() && = delete;
 
-    template <typename F, std::enable_if_t<std::is_invocable_v<F, const T&>, bool> = true>
-    void lock_shared(F&& fn)
+    template <typename F, std::enable_if_t<std::is_invocable_v<F, T&>, bool> = true,
+              typename R = std::invoke_result_t<std::decay_t<F>, T&>>
+    R lock_shared(F&& fn)
     {
         this->assert_mutex_alive();
         std::shared_lock<M> lk(this->pin_->mtx_);

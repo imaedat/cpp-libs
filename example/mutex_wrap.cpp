@@ -26,11 +26,12 @@ void normal_mutex(thread_pool& pool)
             pool.submit([&, i] {
                 con.info("task-%02d: start", i);
                 auto ms = random() % 300;
-                str.lock([&](auto& data) {
+                [[maybe_unused]] auto _ = str.lock([&](auto& data) {
                     con.info("task-%02d: acquire resource(%s), work for %lu ms ...", i,
                              data.c_str(), ms);
                     usleep(ms * 1000);
                     con.info("task-%02d: finished", i);
+                    return data.size();
                 });
             });
         }
