@@ -8,6 +8,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <ostream>
 #include <string>
 #include <tuple>
@@ -98,7 +99,7 @@ class uuid
 
     std::string to_string() const
     {
-        static constexpr const char* const hex = "0123456789abcdef";
+        static constexpr const char hex[] = "0123456789abcdef";
 
         std::string s(36, '\0');
         auto* p = s.data();
@@ -164,5 +165,14 @@ inline std::ostream& operator<<(std::ostream& os, const tbd::uuid& u)
 {
     return (os << u.to_string());
 }
+
+template <>
+struct std::hash<tbd::uuid>
+{
+    size_t operator()(const tbd::uuid& u) const noexcept
+    {
+        return std::hash<std::string_view>{}(std::string_view((const char*)u.data(), u.size()));
+    }
+};
 
 #endif
