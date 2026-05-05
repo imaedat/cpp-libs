@@ -55,11 +55,11 @@ class popen
     std::optional<std::string> getline() const noexcept
     {
         char buf[BUFSIZ] = {0};
-        if (!::fgets(buf, BUFSIZ, fp_)) {
+        if (!std::fgets(buf, BUFSIZ, fp_)) {
             return std::nullopt;
         }
 
-        auto len = ::strlen(buf);
+        auto len = std::strlen(buf);
         if (len > 0 && buf[len - 1] == '\n') {
             buf[len - 1] = '\0';
         }

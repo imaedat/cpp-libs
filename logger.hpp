@@ -146,7 +146,7 @@ class logger
         if (!dir.empty()) {
             std::filesystem::create_directories(dir);
         }
-        fp_ = ::fopen(filepath_.c_str(), "a");
+        fp_ = std::fopen(filepath_.c_str(), "a");
         if (!fp_) {
             throw std::system_error(errno, std::generic_category(), "logger");
         }
@@ -302,7 +302,7 @@ class logger
             req.level = lv;
             req.message = format(pass(fmt), pass(args)...);
             if (req.message.empty()) {
-                ::fprintf(stderr, "logger: format error message by %d:%d\n", pid_, req.tid);
+                std::fprintf(stderr, "logger: format error message by %d:%d\n", pid_, req.tid);
                 return;
             }
 
@@ -339,7 +339,7 @@ class logger
     {
         static constexpr int INITSZ = 512;
         thread_local char buf[INITSZ] = {0};
-        auto result = ::snprintf(buf, INITSZ, args...);
+        auto result = std::snprintf(buf, INITSZ, args...);
         if (result < 0) {
             return "";
         }
@@ -348,7 +348,7 @@ class logger
         }
 
         std::string s(result + 1, 0);
-        ::snprintf(s.data(), result + 1, args...);
+        std::snprintf(s.data(), result + 1, args...);
         s.resize(result);
         return s;
     }
@@ -385,7 +385,7 @@ class logger
                     break;
 
                 case req_type::flush:
-                    ::fflush(fp_);
+                    std::fflush(fp_);
                     break;
 
                 case req_type::reopen:
@@ -407,12 +407,12 @@ class logger
             }
 
         } catch (const std::exception& e) {
-            ::fprintf(stderr, "logger: unexpected exception: %s\n", e.what());
+            std::fprintf(stderr, "logger: unexpected exception: %s\n", e.what());
         }
 
     close:
-        ::fflush(fp_);
-        ::fclose(fp_);
+        std::fflush(fp_);
+        std::fclose(fp_);
     }
 
     void log_msg(const request& req) noexcept

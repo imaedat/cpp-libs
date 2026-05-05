@@ -1,6 +1,8 @@
 #ifndef CONFIG_HPP_
 #define CONFIG_HPP_
 
+#include <ctype.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -44,13 +46,13 @@ class config
             }
 
         } else if constexpr (std::is_integral_v<T>) {
-            auto ival = ::strtoll(sval.c_str(), &endptr, 0);
+            auto ival = std::strtoll(sval.c_str(), &endptr, 0);
             if (errno == 0 && endptr && endptr != sval.c_str() && *endptr == '\0') {
                 return (T)ival;
             }
 
         } else if constexpr (std::is_floating_point_v<T>) {
-            auto fval = ::strtod(sval.c_str(), &endptr);
+            auto fval = std::strtod(sval.c_str(), &endptr);
             if (errno == 0 && endptr && endptr != sval.c_str() && *endptr == '\0') {
                 return (T)fval;
             }

@@ -436,14 +436,14 @@ class cmdopt
         errno = 0;
 
         if constexpr (std::is_integral_v<T>) {
-            auto result = ::strtoll(value.c_str(), &endptr, 0);
+            auto result = std::strtoll(value.c_str(), &endptr, 0);
             if (errno == 0 && endptr && endptr != value.c_str() && *endptr == '\0') {
                 return (T)result;
             }
             throw cmdopt_error("option " + o.repr() + " has no integer value: " + value);
 
         } else if constexpr (std::is_floating_point_v<T>) {
-            auto result = ::strtod(value.c_str(), &endptr);
+            auto result = std::strtod(value.c_str(), &endptr);
             if (errno == 0 && endptr && endptr != value.c_str() && *endptr == '\0') {
                 return (T)result;
             }

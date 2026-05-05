@@ -3,18 +3,21 @@
 
 #include <cxxabi.h>
 
+#include <cstdlib>
 #include <string>
 #include <typeinfo>
 
-inline std::string typename_(const char* mangled)
+namespace tbd {
+inline std::string demangle(const char* mangled)
 {
     int status;
     char* n = abi::__cxa_demangle(mangled, 0, 0, &status);
     std::string name(n);
-    free(n);
+    std::free(n);
     return name;
 }
+}  // namespace tbd
 
-#define TYPENAME(obj) typename_(typeid((obj)).name())
+#define TYPENAME(obj) tbd::demangle(typeid((obj)).name())
 
 #endif

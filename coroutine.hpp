@@ -96,7 +96,7 @@ class coroutine_env
             if (!state_) {
                 throw std::invalid_argument("context: invalid state");
             }
-            if (!state_->env_ || ::memcmp(state_->env_, MAGIC, sizeof(MAGIC)) != 0) {
+            if (!state_->env_ || std::memcmp(state_->env_, MAGIC, sizeof(MAGIC)) != 0) {
                 throw std::invalid_argument("context: env expired");
             }
         }
@@ -144,7 +144,7 @@ class coroutine_env
             }
             if (::mprotect(stack_, pagesz, PROT_NONE) < 0) {  // guard page
                 auto err = errno;
-                ::free(stack_);
+                std::free(stack_);
                 stack_ = nullptr;
                 throw std::system_error(err, std::generic_category(), "state: mprotect");
             }
@@ -171,7 +171,7 @@ class coroutine_env
         {
             if (stack_) {
                 ::mprotect(stack_, ::sysconf(_SC_PAGE_SIZE), PROT_READ | PROT_WRITE);
-                ::free(stack_);
+                std::free(stack_);
                 stack_ = nullptr;
             }
         }
@@ -210,7 +210,7 @@ class coroutine_env
             if (!state_ || !state_->stack_) {
                 throw std::invalid_argument("coroutine: invalid state");
             }
-            if (!state_->env_ || ::memcmp(state_->env_, MAGIC, sizeof(MAGIC)) != 0) {
+            if (!state_->env_ || std::memcmp(state_->env_, MAGIC, sizeof(MAGIC)) != 0) {
                 throw std::invalid_argument("coroutine: env expired");
             }
 
@@ -281,7 +281,7 @@ class coroutine_env
         if (!uctx_) {
             throw std::system_error(errno, std::generic_category(), "coroutine_env: malloc");
         }
-        ::memcpy(magic_, MAGIC, sizeof(magic_));
+        std::memcpy(magic_, MAGIC, sizeof(magic_));
     }
 
     coroutine_env(const coroutine_env&) = delete;
@@ -290,16 +290,16 @@ class coroutine_env
         : uctx_(std::exchange(rhs.uctx_, nullptr))
         , last_value_(std::move(rhs.last_value_))
     {
-        ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
+        std::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
         ::explicit_bzero(&rhs.magic_, sizeof(rhs.magic_));
     }
     coroutine_env& operator=(coroutine_env&& rhs) noexcept
     {
         if (this != &rhs) {
             if (uctx_) {
-                ::free(uctx_);
+                std::free(uctx_);
             }
-            ::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
+            std::memcpy(&magic_, &rhs.magic_, sizeof(magic_));
             ::explicit_bzero(&rhs.magic_, sizeof(rhs.magic_));
             uctx_ = std::exchange(rhs.uctx_, nullptr);
             last_value_ = std::move(rhs.last_value_);
@@ -310,7 +310,7 @@ class coroutine_env
     ~coroutine_env() noexcept
     {
         if (uctx_) {
-            ::free(uctx_);
+            std::free(uctx_);
             uctx_ = nullptr;
         }
         ::explicit_bzero(magic_, sizeof(magic_));
@@ -375,7 +375,7 @@ class coroutine_env
 
         auto ptr = (uintptr_t)state;
         state::entry((unsigned)(ptr >> 32), (unsigned)(ptr & 0xffffffffU));
-        if (!state->env_ || ::memcmp(state->env_, MAGIC, sizeof(MAGIC)) != 0) {
+        if (!state->env_ || std::memcmp(state->env_, MAGIC, sizeof(MAGIC)) != 0) {
             throw std::invalid_argument("coroutine_env: env expired");
         }
 

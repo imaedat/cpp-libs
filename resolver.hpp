@@ -33,7 +33,7 @@ gai_result getaddrinfo(std::string_view host)
     gai_result result;
 
     struct addrinfo hints, *res = nullptr;
-    ::memset(&hints, 0, sizeof(struct addrinfo));
+    std::memset(&hints, 0, sizeof(struct addrinfo));
     hints.ai_family = AF_INET;
     result.error_code = ::getaddrinfo(host.data(), nullptr, &hints, &res);
     if (result.error_code == 0) {
@@ -350,10 +350,10 @@ class async_resolver : public async_resolver_base
     explicit async_resolver(std::string_view host)
         : async_resolver_base(host)
     {
-        ::memset(&hints_, 0, sizeof(hints_));
+        std::memset(&hints_, 0, sizeof(hints_));
         hints_.ai_family = AF_INET;
 
-        ::memset(&req_, 0, sizeof(req_));
+        std::memset(&req_, 0, sizeof(req_));
         req_.ar_name = host_.c_str();
         req_.ar_service = nullptr;
         req_.ar_request = &hints_;

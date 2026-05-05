@@ -58,7 +58,7 @@ class uuid
         uint64_t ts_rand = ((now / NS_PER_MS) << 16) | (7U << 12);
         uint16_t ns = (((now % NS_PER_MS) << 12) + (NS_PER_MS / 2)) / NS_PER_MS;
         ts_rand = ::htobe64(ts_rand | std::min(ns, (uint16_t)0x0fffU));
-        ::memcpy(newid.bytes_.data(), &ts_rand, 8);
+        std::memcpy(newid.bytes_.data(), &ts_rand, 8);
         [[maybe_unused]] auto _ = ::getrandom(newid.bytes_.data() + 8, 8, 0);
         newid.bytes_[8] = (newid.bytes_[8] & 0x3fU) | 0x80U;
         return newid;
@@ -67,7 +67,7 @@ class uuid
     static uuid from_bytes(const void* buf) noexcept
     {
         uuid newid;
-        ::memcpy(newid.bytes_.data(), buf, newid.bytes_.size());
+        std::memcpy(newid.bytes_.data(), buf, newid.bytes_.size());
         return newid;
     }
 
@@ -126,13 +126,13 @@ class uuid
 
     void write_to(void* buf) const noexcept
     {
-        ::memcpy(buf, data(), size());
+        std::memcpy(buf, data(), size());
     }
 
     std::chrono::system_clock::time_point time_point() const noexcept
     {
         uint64_t ns;
-        ::memcpy(&ns, data(), 8);
+        std::memcpy(&ns, data(), 8);
         ns = ::be64toh(ns);
         ns = ((ns >> 16) * NS_PER_MS) + ((((ns & 0x0fffU) * NS_PER_MS) + 2048) >> 12);
         return std::chrono::system_clock::time_point(std::chrono::nanoseconds(ns));

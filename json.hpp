@@ -272,7 +272,7 @@ class json
 
             } else if constexpr (std::is_integral_v<T>) {
                 if (!quoted) {
-                    auto ival = ::strtoll(sv.data(), &endptr, 0);
+                    auto ival = std::strtoll(sv.data(), &endptr, 0);
                     if (errno == 0 && endptr && endptr != sv.data() && *endptr == '\0') {
                         return (T)ival;
                     }
@@ -280,7 +280,7 @@ class json
 
             } else if constexpr (std::is_floating_point_v<T>) {
                 if (!quoted) {
-                    auto fval = ::strtod(sv.data(), &endptr);
+                    auto fval = std::strtod(sv.data(), &endptr);
                     if (errno == 0 && endptr && endptr != sv.data() && *endptr == '\0') {
                         return (T)fval;
                     }
@@ -421,16 +421,16 @@ class json
         }
 
         ssize_t len1 = -1, len2 = -1, len3 = -1;
-        q += (len1 = ::strspn(q, "0123456789"));  // int
+        q += (len1 = std::strspn(q, "0123456789"));  // int
         if (*q == '.') {
-            q += (len2 = ::strspn(++q, "0123456789"));  // frac
+            q += (len2 = std::strspn(++q, "0123456789"));  // frac
         }
         if (*q == 'e' || *q == 'E') {  // exp
             ++q;
             if (*q == '+' || *q == '-') {
                 ++q;
             }
-            q += (len3 = ::strspn(q, "0123456789"));
+            q += (len3 = std::strspn(q, "0123456789"));
         }
         if ((len1 < 0 && len2 < 0) || len3 == 0) {
             throw_invalid(__func__, "invalid number", *p);
@@ -440,13 +440,13 @@ class json
 
     static result_type parse_bool(const char* p)
     {
-        if (::strncmp(p, "true", 4) == 0) {
+        if (std::strncmp(p, "true", 4) == 0) {
             return {json_value(std::string("true")), ltrim(p + 4)};
         }
-        if (::strncmp(p, "false", 5) == 0) {
+        if (std::strncmp(p, "false", 5) == 0) {
             return {json_value(std::string("false")), ltrim(p + 5)};
         }
-        if (::strncmp(p, "null", 4) == 0) {
+        if (std::strncmp(p, "null", 4) == 0) {
             return {json_value(std::string("null")), ltrim(p + 4)};
         }
         throw_invalid(__func__, "unexpected literal", *p);
@@ -454,7 +454,7 @@ class json
 
     static const char* ltrim(const char* p) noexcept
     {
-        return p + ::strspn(p, " \t\r\n");
+        return p + std::strspn(p, " \t\r\n");
     }
 
     /************************************************************************

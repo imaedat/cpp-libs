@@ -535,7 +535,7 @@ class sqlite
             case 3: {  // blob
                 const auto& blob = std::get<3>(value);
                 std::vector<uint8_t> buf(blob.size);
-                ::memcpy(buf.data(), blob.ptr, blob.size);
+                std::memcpy(buf.data(), blob.ptr, blob.size);
                 value_ = std::move(buf);
                 break;
             }
