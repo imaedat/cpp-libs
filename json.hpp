@@ -21,10 +21,12 @@ class json
     [[noreturn]] static void throw_invalid(const std::string& f, std::string_view m, int c = -1)
     {
         std::string what = f + ": " + m.data();
-        if (c >= 0) {
+        if (c > 0) {
             what.append(" (`");
             what.push_back((char)c);
             what.append("')");
+        } else if (c == 0) {
+            what.append(" (<nul>)");
         }
         throw std::invalid_argument(what);
     }
@@ -63,7 +65,11 @@ class json
 
     static json parse(const std::string& s)
     {
-        auto [j, _] = parse_value(ltrim(s.data()));
+        auto [j, p] = parse_value(ltrim(s.data()));
+        p = ltrim(p);
+        if (*p != '\0') {
+            throw_invalid(__func__, "unexpected char", *p);
+        }
         return std::any_cast<json>(j);
     }
 
@@ -319,8 +325,8 @@ class json
             return parse_string(p);
 
         // clang-format off
-        case '0': case '1': case '2': case '3': case '4':
-        case '5': case '6': case '7': case '8': case '9': case '-':
+        case '0': case '1': case '2': case '3': case '4': case '5':
+        case '6': case '7': case '8': case '9': case '-': case '.':
             // clang-format on
             return parse_number(p);
 
@@ -328,6 +334,9 @@ class json
         case 't': case 'f': case 'n':
             // clang-format on
             return parse_bool(p);
+
+        case '\0':
+            return {json{}, p};
 
         default:
             throw_invalid(__func__, "unexpected char", *p);
@@ -348,7 +357,7 @@ class json
         auto q = ltrim(p + 1);
         object_type obj;
         bool comma = false;
-        while (comma || *q != '}') {
+        while (*q != '}') {
             if (*q != '"') {
                 throw_invalid(__func__, "key not starts with quote", *q);
             }
@@ -362,8 +371,13 @@ class json
             q = s;
             obj.emplace(std::any_cast<std::string>(std::any_cast<json>(k).value_), std::move(v));
 
-            comma = *q == ',';
-            q = ltrim(comma ? q + 1 : q);
+            q = ltrim((comma = *q == ',') ? q + 1 : q);
+            if (!comma) {
+                break;
+            }
+        }
+        if (comma) {
+            throw_invalid(__func__, "next key-value expected", *q);
         }
         if (*q != '}') {
             throw_invalid(__func__, "object not ends with right-brace", *q);
@@ -377,12 +391,17 @@ class json
         auto q = ltrim(p + 1);
         array_type arr;
         bool comma = false;
-        while (comma || *q != ']') {
+        while (*q != ']') {
             auto [v, r] = parse_value(q);
             q = r;
             arr.emplace_back(std::move(v));
-            comma = *q == ',';
-            q = ltrim(comma ? q + 1 : q);
+            q = ltrim((comma = *q == ',') ? q + 1 : q);
+            if (!comma) {
+                break;
+            }
+        }
+        if (comma) {
+            throw_invalid(__func__, "next value expected", *q);
         }
         if (*q != ']') {
             throw_invalid(__func__, "array not ends with right-bracket", *q);
@@ -432,10 +451,11 @@ class json
             }
             q += (len3 = std::strspn(q, "0123456789"));
         }
-        if ((len1 < 0 && len2 < 0) || len3 == 0) {
-            throw_invalid(__func__, "invalid number", *p);
+        std::string n(p, q - p);
+        if ((len1 <= 0 && len2 <= 0) || len3 == 0) {
+            throw_invalid(__func__, "invalid numeric: " + n);
         }
-        return {json_value(std::string(p, q - p)), q};
+        return {json_value(std::move(n)), q};
     }
 
     static result_type parse_bool(const char* p)
