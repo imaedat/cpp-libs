@@ -1,7 +1,6 @@
 #ifndef JSON_HPP_
 #define JSON_HPP_
 
-#include <algorithm>
 #include <any>
 #include <cassert>
 #include <cstring>
@@ -70,7 +69,7 @@ class json
         if (*p != '\0') {
             throw_invalid(__func__, "unexpected char", *p);
         }
-        return std::any_cast<json>(j);
+        return *to_json_(j);
     }
 
     static json load(std::string_view file)
@@ -83,58 +82,63 @@ class json
     /************************************************************************
      * const attributes
      */
-    bool null() const
+    bool is_null() const
     {
-        if (!value_.has_value()) {
-            return true;
-        }
-
-        auto str = to_string_(value_);
-        return str && *str == "null";
+        return !value_.has_value();
     }
 
-    bool empty() const
-    {
-        if (auto obj = to_object_(value_)) {
-            return obj->empty();
-        }
-        if (auto arr = to_array_(value_)) {
-            return arr->empty();
-        }
-        throw_invalid(__func__, "neithrer object nor array");
-    }
-
-    size_t size() const
-    {
-        if (auto obj = to_object_(value_)) {
-            return obj->size();
-        }
-        if (auto arr = to_array_(value_)) {
-            return arr->size();
-        }
-        throw_invalid(__func__, "neithrer object nor array");
-    }
-
-    bool object() const
+    bool is_object() const
     {
         return to_object_(value_) != nullptr;
     }
 
-    bool array() const
+    bool is_array() const
     {
         return to_array_(value_) != nullptr;
     }
 
+    bool empty() const
+    {
+        if (auto* obj = to_object_(value_)) {
+            return obj->empty();
+        }
+        if (auto* arr = to_array_(value_)) {
+            return arr->empty();
+        }
+        if (auto* str = to_string_(value_)) {
+            if (quoted_(str)) {
+                return *str == "\"\"";
+            }
+        }
+        throw_invalid(__func__, "not container");
+    }
+
+    size_t size() const
+    {
+        if (auto* obj = to_object_(value_)) {
+            return obj->size();
+        }
+        if (auto* arr = to_array_(value_)) {
+            return arr->size();
+        }
+        if (auto* str = to_string_(value_)) {
+            if (quoted_(str)) {
+                return str->size() - 2;
+            }
+        }
+        throw_invalid(__func__, "not container");
+    }
+
     bool contains(std::string_view key) const
     {
-        if (auto obj = to_object_(value_)) {
+        if (auto* obj = to_object_(value_)) {
             return obj->find(key.data()) != obj->end();
         }
         throw_invalid(__func__, "not object");
     }
 
     /************************************************************************
-     * assign operator
+     * common operation
      */
     template <typename T, std::enable_if_t<!std::is_same_v<std::decay_t<T>, json>, bool> = true>
     json& operator=(T&& v)
@@ -151,26 +155,39 @@ class json
         return *this;
     }
 
+    void clear()
+    {
+        if (auto* obj = to_object_(value_)) {
+            obj->clear();
+            return;
+
+        } else if (auto* arr = to_array_(value_)) {
+            arr->clear();
+            return;
+
+        } else if (auto* str = to_string_(value_)) {
+            if (quoted_(str)) {
+                str->assign("\"\"");
+                return;
+            }
+        }
+
+        throw_invalid(__func__, "not container");
+    }
+
+    void reset()
+    {
+        value_.reset();
+    }
+
     /************************************************************************
      * object operator
      */
-    std::vector<std::string> keys() const
-    {
-        if (auto obj = to_object_(value_)) {
-            std::vector<std::string> keys;
-            keys.reserve(obj->size());
-            std::transform(obj->begin(), obj->end(), std::back_inserter(keys),
-                           [](const auto& it) { return it.first; });
-            return keys;
-        }
-        throw_invalid(__func__, "not object");
-    }
-
     const json& at(std::string_view key) const
     {
-        if (auto obj = to_object_(value_)) {
+        if (auto* obj = to_object_(value_)) {
             if (auto it = obj->find(key.data()); it != obj->end()) {
-                return *std::any_cast<json>(&it->second);
+                return *to_json_(it->second);
             }
             throw_invalid(__func__, "key not found");
         }
@@ -179,48 +196,101 @@ class json
 
     json& operator[](std::string_view key)
     {
-        if (null()) {
+        if (is_null()) {
             value_ = object_type{};
         }
-        if (auto obj = to_object_(value_)) {
-            auto map = const_cast<object_type*>(obj);
-            auto it = map->find(key.data());
-            if (it == map->end()) {
-                std::tie(it, std::ignore) = map->emplace(key, json{});
+        if (auto* obj = to_object_(value_)) {
+            auto it = obj->find(key.data());
+            if (it == obj->end()) {
+                std::tie(it, std::ignore) = obj->emplace(key, json{});
             }
-            return *std::any_cast<json>(&it->second);
+            return *to_json_(it->second);
         }
         throw_invalid(__func__, "not object");
     }
 
     void erase(std::string_view key)
     {
-        if (auto obj = to_object_(value_)) {
-            auto map = const_cast<object_type*>(obj);
-            map->erase(key.data());
+        if (auto* obj = to_object_(value_)) {
+            obj->erase(key.data());
             return;
         }
         throw_invalid(__func__, "not object");
     }
+
+#if 1
+    struct item_ref
+    {
+        const std::string& key;
+        json& value;
+    };
+
+    struct object_iterator
+    {
+        object_type::iterator it;
+        explicit object_iterator(object_type::iterator i)
+            : it(i)
+        {
+        }
+        item_ref operator*() const
+        {
+            return {it->first, *to_json_(it->second)};
+        }
+        object_iterator& operator++()
+        {
+            ++it;
+            return *this;
+        }
+        bool operator==(const object_iterator& rhs) const
+        {
+            return it == rhs.it;
+        }
+        bool operator!=(const object_iterator& rhs) const
+        {
+            return !(*this == rhs);
+        }
+    };
+
+    struct object_view
+    {
+        object_type* obj;
+        object_iterator begin() const
+        {
+            return object_iterator(obj->begin());
+        }
+        object_iterator end() const
+        {
+            return object_iterator(obj->end());
+        }
+    };
+
+    object_view items()
+    {
+        if (auto* obj = to_object_(value_)) {
+            return object_view{obj};
+        }
+        throw_invalid(__func__, "not object");
+    }
+#endif
 
     /************************************************************************
      * array operator
      */
     const json& at(size_t i) const
     {
-        if (auto arr = to_array_(value_)) {
+        if (auto* arr = to_array_(value_)) {
             if (i < arr->size()) {
-                return *std::any_cast<json>(&arr->at(i));
+                return *to_json_(arr->at(i));
             }
-            throw_invalid(__func__, "index out of range");
+            throw_invalid(__func__, "out of range");
         }
         throw_invalid(__func__, "not array");
     }
 
     json& operator[](size_t i)
     {
-        if (auto arr = to_array_(value_)) {
-            return *std::any_cast<json>(&(const_cast<array_type*>(arr)->at(i)));
+        if (auto* arr = to_array_(value_)) {
+            return *to_json_(arr->at(i));
         }
         throw_invalid(__func__, "not array");
     }
@@ -228,13 +298,13 @@ class json
     template <typename J, std::enable_if_t<std::is_same_v<std::decay_t<J>, json>, bool> = true>
     void push_back(J&& j)
     {
-        if (null()) {
+        if (is_null()) {
             array_type arr;
             arr.push_back(std::forward<J>(j));
             value_ = std::move(arr);
 
-        } else if (auto arr = to_array_(value_)) {
-            const_cast<array_type*>(arr)->push_back(std::forward<J>(j));
+        } else if (auto* arr = to_array_(value_)) {
+            arr->push_back(std::forward<J>(j));
 
         } else {
             throw_invalid(__func__, "not array");
@@ -249,21 +319,65 @@ class json
         push_back(std::move(j));
     }
 
+#if 1
+    struct array_iterator
+    {
+        array_type::iterator it;
+        explicit array_iterator(array_type::iterator i)
+            : it(i)
+        {
+        }
+        json& operator*() const
+        {
+            return *to_json_(*it);
+        }
+        array_iterator& operator++()
+        {
+            ++it;
+            return *this;
+        }
+        bool operator==(const array_iterator& rhs) const
+        {
+            return it == rhs.it;
+        }
+        bool operator!=(const array_iterator& rhs) const
+        {
+            return !(*this == rhs);
+        }
+    };
+
+    array_iterator begin() const
+    {
+        if (auto* arr = to_array_(value_)) {
+            return array_iterator(const_cast<array_type*>(arr)->begin());
+        }
+        throw_invalid(__func__, "not array");
+    }
+
+    array_iterator end() const
+    {
+        if (auto* arr = to_array_(value_)) {
+            return array_iterator(const_cast<array_type*>(arr)->end());
+        }
+        throw_invalid(__func__, "not array");
+    }
+#endif
+
     /************************************************************************
      * value accessor
      */
     template <typename T>
     T get() const
     {
-        if (auto str = to_string_(value_)) {
-            bool quoted = str->front() == '"' && str->back() == '"';
+        if (auto* str = to_string_(value_)) {
+            bool quoted = quoted_(str);
             std::string_view sv(str->data() + (quoted ? 1 : 0), str->size() - (quoted ? 2 : 0));
             char* endptr = nullptr;
             errno = 0;
 
             if constexpr (std::is_same_v<T, std::string>) {
                 if (quoted) {
-                    return std::string(sv);
+                    return unescape_(sv);
                 }
 
             } else if constexpr (std::is_same_v<T, bool>) {
@@ -295,7 +409,7 @@ class json
 
             throw_invalid(__func__, "type error");
         }
-        throw_invalid(__func__, "not primitive type");
+        throw_invalid(__func__, "not primitive");
     }
 
     /************************************************************************
@@ -304,7 +418,7 @@ class json
     std::string to_string() const
     {
         std::ostringstream ss;
-        stringify_(ss, *this);
+        stringify_(ss, this);
         return ss.str();
     }
 
@@ -359,7 +473,7 @@ class json
         bool comma = false;
         while (*q != '}') {
             if (*q != '"') {
-                throw_invalid(__func__, "key not starts with quote", *q);
+                throw_invalid(__func__, "key not start with quote", *q);
             }
 
             auto [k, r] = parse_string(q, true);
@@ -369,7 +483,8 @@ class json
             }
             auto [v, s] = parse_value(ltrim(q));
             q = s;
-            obj.emplace(std::any_cast<std::string>(std::any_cast<json>(k).value_), std::move(v));
+            auto* key = to_string_(to_json_(k)->value_);
+            obj.emplace(std::move(*key), std::move(v));
 
             q = ltrim((comma = *q == ',') ? q + 1 : q);
             if (!comma) {
@@ -380,7 +495,7 @@ class json
             throw_invalid(__func__, "next key-value expected", *q);
         }
         if (*q != '}') {
-            throw_invalid(__func__, "object not ends with right-brace", *q);
+            throw_invalid(__func__, "object not end with right-brace", *q);
         }
         return {json_value(std::move(obj)), ltrim(q + 1)};
     }
@@ -404,7 +519,7 @@ class json
             throw_invalid(__func__, "next value expected", *q);
         }
         if (*q != ']') {
-            throw_invalid(__func__, "array not ends with right-bracket", *q);
+            throw_invalid(__func__, "array not end with right-bracket", *q);
         }
         return {json_value(std::move(arr)), ltrim(q + 1)};
     }
@@ -467,7 +582,7 @@ class json
             return {json_value(std::string("false")), ltrim(p + 5)};
         }
         if (std::strncmp(p, "null", 4) == 0) {
-            return {json_value(std::string("null")), ltrim(p + 4)};
+            return {json{}, ltrim(p + 4)};
         }
         throw_invalid(__func__, "unexpected literal", *p);
     }
@@ -485,7 +600,17 @@ class json
         return std::any_cast<object_type>(&v);
     }
 
+    static object_type* to_object_(std::any& v)
+    {
+        return std::any_cast<object_type>(&v);
+    }
+
     static const array_type* to_array_(const std::any& v)
+    {
+        return std::any_cast<array_type>(&v);
+    }
+
+    static array_type* to_array_(std::any& v)
     {
         return std::any_cast<array_type>(&v);
     }
@@ -495,32 +620,47 @@ class json
         return std::any_cast<std::string>(&v);
     }
 
+    static std::string* to_string_(std::any& v)
+    {
+        return std::any_cast<std::string>(&v);
+    }
+
+    static const json* to_json_(const std::any& v)
+    {
+        return std::any_cast<json>(&v);
+    }
+
+    static json* to_json_(std::any& v)
+    {
+        return std::any_cast<json>(&v);
+    }
+
     /************************************************************************
      * stringify
      */
-    static void stringify_(std::ostringstream& ss, const json& j)
+    static void stringify_(std::ostringstream& ss, const json* j)
     {
-        if (auto obj = to_object_(j.value_)) {
-            stringify_(ss, obj);
+        if (auto* obj = to_object_(j->value_)) {
+            stringify_(ss, *obj);
 
-        } else if (auto arr = to_array_(j.value_)) {
-            stringify_(ss, arr);
+        } else if (auto* arr = to_array_(j->value_)) {
+            stringify_(ss, *arr);
 
-        } else if (auto str = to_string_(j.value_)) {
-            stringify_(ss, str);
+        } else if (auto* str = to_string_(j->value_)) {
+            stringify_(ss, *str);
 
         } else {
             ss << "null";
         }
     }
 
-    static void stringify_(std::ostringstream& ss, const object_type* obj)
+    static void stringify_(std::ostringstream& ss, const object_type& obj)
     {
         ss << "{";
-        auto remains = obj->size();
-        for (const auto& [k, v] : *obj) {
+        auto remains = obj.size();
+        for (const auto& [k, v] : obj) {
             ss << "\"" << k << "\":";
-            stringify_(ss, std::any_cast<json>(v));
+            stringify_(ss, to_json_(v));
             if (--remains > 0) {
                 ss << ",";
             }
@@ -528,12 +668,12 @@ class json
         ss << "}";
     }
 
-    static void stringify_(std::ostringstream& ss, const array_type* arr)
+    static void stringify_(std::ostringstream& ss, const array_type& arr)
     {
         ss << "[";
-        auto remains = arr->size();
-        for (const auto& v : *arr) {
-            stringify_(ss, std::any_cast<json>(v));
+        auto remains = arr.size();
+        for (const auto& v : arr) {
+            stringify_(ss, to_json_(v));
             if (--remains > 0) {
                 ss << ",";
             }
@@ -541,9 +681,46 @@ class json
         ss << "]";
     }
 
-    static void stringify_(std::ostringstream& ss, const std::string* str)
+    static void stringify_(std::ostringstream& ss, const std::string& str)
     {
-        ss << *str;
+        ss << str;
+    }
+
+    /************************************************************************
+     * helper
+     */
+    static bool quoted_(const std::string* s)
+    {
+        return s->front() == '"' && s->back() == '"';
+    }
+
+    static std::string unescape_(std::string_view sv)
+    {
+        std::string s;
+        s.reserve(sv.size());
+        bool escape = false;
+        for (auto c : sv) {
+            if (c == '\\' && !escape) {
+                escape = true;
+                continue;
+            }
+            if (escape) {
+                if (c == 'b') {
+                    c = '\b';
+                } else if (c == 'f') {
+                    c = '\f';
+                } else if (c == 'n') {
+                    c = '\n';
+                } else if (c == 'r') {
+                    c = '\r';
+                } else if (c == 't') {
+                    c = '\t';
+                }
+                escape = false;
+            }
+            s.push_back(c);
+        }
+        return s;
     }
 };
 
