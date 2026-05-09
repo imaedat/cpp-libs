@@ -845,7 +845,7 @@ class json
             q += (len3 = std::strspn(q, "0123456789"));
         }
         std::string s(p, q - p);
-        if ((len1 <= 0 && len2 <= 0) || len3 == 0) {
+        if (len1 == 0 || (len1 >= 2 && p[0] == '0') || len2 == 0 || len3 == 0) {
             throw_invalid(__func__, "invalid numeric: " + s);
         }
         auto type = (len2 >= 0 || len3 > 0) ? value_t::floating : value_t::integral;
