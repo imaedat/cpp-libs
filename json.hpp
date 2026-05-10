@@ -443,7 +443,7 @@ class json
             return rhs.is_number() && get<double>() == rhs.get<double>();
 
         case value_t::string:
-            return rhs.is_string() && *to_str_() == *rhs.to_str_();
+            return rhs.is_string() && get<std::string>() == rhs.get<std::string>();
 
         case value_t::object:
             return rhs.is_object() && *to_obj_() == *rhs.to_obj_();
@@ -1040,32 +1040,82 @@ class json
         }
     }
 
-    static std::string unescape_(const std::string& s)
+    static std::string unescape_(std::string_view s)
     {
         std::string u;
         u.reserve(s.size());
-        bool escape = false;
-        for (auto c : s) {
-            if (c == '\\' && !escape) {
-                escape = true;
-                continue;
+        auto* p = s.data();
+        while (true) {
+            char c = *p++;
+            if (c == '\0') {
+                break;
             }
-            u.push_back(escape ? unescape_(c) : c);
-            escape = false;
+            if (c == '\\') {
+                c = *p++;
+                if (c == 'u') {
+                    unescape_utf8(u, p);
+                } else {
+                    u.push_back(unescape_(c));
+                }
+            } else {
+                u.push_back(c);
+            }
         }
-        assert(!escape);
         return u;
     }
 
-    static char unescape_(char c) noexcept
+    static void unescape_utf8(std::string& u, const char*& p)
+    {
+        const char* start = p;
+        unsigned cp = 0;
+        for (int i = 0; i < 4; ++i) {
+            char c = *p++;
+            auto h = ('0' <= c && c <= '9')   ? c - '0'
+                     : ('a' <= c && c <= 'f') ? c - 'a' + 10
+                     : ('A' <= c && c <= 'F') ? c - 'A' + 10
+                                              : -1;
+            if (h < 0) {
+                throw_invalid(__func__, "invalide code point", c);
+            }
+            cp = (cp << 4) + h;
+        }
+
+        if (cp <= 0x7f) {
+            u.push_back((char)cp);
+        } else if (cp <= 0x7ff) {
+            u.push_back((char)(0xc0 | ((cp >> 6) & 0x1f)));
+            u.push_back((char)(0x80 | (cp & 0x3f)));
+        } else if (cp < 0xd800 || 0xdfff < cp) {
+            u.push_back((char)(0xe0 | ((cp >> 12) & 0x0f)));
+            u.push_back((char)(0x80 | ((cp >> 6) & 0x3f)));
+            u.push_back((char)(0x80 | (cp & 0x3f)));
+        } else {
+            // XXX unhandled
+            u.push_back('\\');
+            u.push_back('u');
+            u.append(start, 4);
+        }
+    }
+
+    static char unescape_(char c)
     {
         // XXX invalid/unknown escape sequence?
-        return (c == 'b')   ? '\b'
-               : (c == 'f') ? '\f'
-               : (c == 'n') ? '\n'
-               : (c == 'r') ? '\r'
-               : (c == 't') ? '\t'
-                            : c;
+        switch (c) {
+        case 'b':
+            return '\b';
+        case 'f':
+            return '\f';
+        case 'n':
+            return '\n';
+        case 'r':
+            return '\r';
+        case 't':
+            return '\t';
+        case '\0':
+            throw_invalid(__func__, "unexpectd eof");
+        default:
+            return c;
+        }
     }
 };
 
