@@ -21,10 +21,9 @@ namespace tbd {
 class json
 {
   public:
-    inline static constexpr size_t MAX_VALUE_SIZE = 64;
+    inline static constexpr size_t VALUE_BUFFER_SIZE = 64;
     using object_type = std::unordered_map<std::string, json>;
     using array_type = std::vector<json>;
-    using value_type = std::variant<std::monostate, bool, int64_t, double, std::string, json>;
 
   private:
     [[noreturn]] static void throw_invalid(const std::string& f, std::string_view m, int c = -1)
@@ -46,17 +45,21 @@ class json
         throw std::invalid_argument(what);
     }
 
+    using value_type = std::variant<std::monostate, bool, int64_t, double, std::string, json>;
     using result_type = std::pair<json, const char*>;
     template <typename T>
     inline static constexpr bool string_like =
         std::is_convertible_v<std::decay_t<T>, std::string_view>;
+    inline static constexpr size_t num_offset =
+        (sizeof(std::string) + alignof(std::max_align_t) - 1) & ~(alignof(std::max_align_t) - 1);
+    static_assert(num_offset + std::max(sizeof(int64_t), sizeof(double)) <= VALUE_BUFFER_SIZE);
     union number
     {
         int64_t i;
         double d;
     };
 
-    alignas(alignof(std::max_align_t)) uint8_t buffer_[MAX_VALUE_SIZE] = {0};
+    alignas(alignof(std::max_align_t)) uint8_t buffer_[VALUE_BUFFER_SIZE] = {0};
     mutable size_t textsize_ = 0;
     enum class value_t : uint8_t
     {
@@ -732,8 +735,8 @@ class json
     }
 
     // clang-format off
-          void* numbuffer_()       { return buffer_ + sizeof(std::string); }
-    const void* numbuffer_() const { return buffer_ + sizeof(std::string); }
+          void* numbuffer_()       { return buffer_ + num_offset; }
+    const void* numbuffer_() const { return buffer_ + num_offset; }
 
     bool holds_as_string() const { return is_integer() || is_floating() || is_string(); }
 
@@ -1119,6 +1122,9 @@ class json
     }
 };
 
+static_assert(sizeof(json::object_type) <= json::VALUE_BUFFER_SIZE);
+static_assert(sizeof(json::array_type) <= json::VALUE_BUFFER_SIZE);
+
 /****************************************************************************
  * object iterator
  */
@@ -1176,10 +1182,5 @@ struct std::iterator_traits<tbd::json::object_iterator>
 {
     using iterator_category = std::forward_iterator_tag;
 };
-
-static_assert(sizeof(std::string) + std::max(sizeof(int64_t), sizeof(double)) <=
-              tbd::json::MAX_VALUE_SIZE);
-static_assert(sizeof(tbd::json::object_type) <= tbd::json::MAX_VALUE_SIZE);
-static_assert(sizeof(tbd::json::array_type) <= tbd::json::MAX_VALUE_SIZE);
 
 #endif
