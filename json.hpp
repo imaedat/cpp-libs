@@ -67,7 +67,9 @@ class json
         null,
         boolean,
         integral,
+        integral_uncached,
         floating,
+        floating_uncached,
         string,
         unescaped_string,
         object,
@@ -85,7 +87,9 @@ class json
             break;
 
         case value_t::integral:
+        case value_t::integral_uncached:
         case value_t::floating:
+        case value_t::floating_uncached:
         case value_t::string:
         case value_t::unescaped_string:
             new (buffer_) std::string();
@@ -118,7 +122,11 @@ class json
                 *to_str_() = escape_(v);
             } else {
                 *to_str_() = std::forward<V>(v);
-                init_cache(n);
+                if (type_ == value_t::integral) {
+                    *to_int_() = n.i;
+                } else if (type_ == value_t::floating) {
+                    *to_float_() = n.d;
+                }
             }
         } else if constexpr (std::is_same_v<std::decay_t<V>, object_type>) {
             operator=(std::forward<V>(v));
@@ -275,6 +283,8 @@ class json
                 copy_value(rhs);
                 [[fallthrough]];
 
+            case value_t::integral_uncached:
+            case value_t::floating_uncached:
             case value_t::string:
                 new (buffer_) std::string(*rhs.to_str_());
                 break;
@@ -316,6 +326,8 @@ class json
                 copy_value(rhs);
                 [[fallthrough]];
 
+            case value_t::integral_uncached:
+            case value_t::floating_uncached:
             case value_t::string:
                 new (buffer_) std::string(std::move(*rhs.to_str_()));
                 break;
@@ -374,8 +386,10 @@ class json
     // clang-format off
     bool is_null() const { return type_ == value_t::null; }
     bool is_bool() const { return type_ == value_t::boolean; }
-    bool is_integer() const { return type_ == value_t::integral; }
-    bool is_floating() const { return type_ == value_t::floating; }
+    bool is_integer() const { return type_ == value_t::integral ||
+                                     type_ == value_t::integral_uncached; }
+    bool is_floating() const { return type_ == value_t::floating ||
+                                      type_ == value_t::floating_uncached; }
     bool is_number() const { return is_integer() || is_floating(); }
     bool is_string() const { return type_ == value_t::string; }
     bool is_primitive() const { return is_null() || is_bool() || is_number() || is_string(); }
@@ -439,10 +453,12 @@ class json
             return rhs.is_bool() && *to_bool_() == *rhs.to_bool_();
 
         case value_t::integral:
+        case value_t::integral_uncached:
             return (rhs.is_integer() && get<int64_t>() == rhs.get<int64_t>()) ||
                    (rhs.is_floating() && get<double>() == rhs.get<double>());
 
         case value_t::floating:
+        case value_t::floating_uncached:
             return rhs.is_number() && get<double>() == rhs.get<double>();
 
         case value_t::string:
@@ -473,6 +489,15 @@ class json
             }
 
         } else if constexpr (std::is_arithmetic_v<T>) {
+            auto* self = const_cast<json*>(this);
+            if (type_ == value_t::integral_uncached) {
+                *self->to_int_() = strtonum<int64_t>();
+                self->type_ = value_t::integral;
+            } else if (type_ == value_t::floating_uncached) {
+                *self->to_float_() = strtonum<double>();
+                self->type_ = value_t::floating;
+            }
+
             if (auto* num = to_int_()) {
                 return *num;
             }
@@ -538,7 +563,9 @@ class json
             break;
 
         case value_t::integral:
+        case value_t::integral_uncached:
         case value_t::floating:
+        case value_t::floating_uncached:
         case value_t::string:
         case value_t::unescaped_string:
             to_str_()->~basic_string();
@@ -741,8 +768,8 @@ class json
     }
 
     // clang-format off
-          void* numbuffer_()       { return buffer_ + num_offset; }
-    const void* numbuffer_() const { return buffer_ + num_offset; }
+          void* numbuffer_()       { return std::launder(buffer_ + num_offset); }
+    const void* numbuffer_() const { return std::launder(buffer_ + num_offset); }
 
     bool holds_as_string() const { return is_integer() || is_floating() || is_string(); }
 
@@ -760,15 +787,6 @@ class json
     const bool*        to_bool_() const  { return cast_<bool>(is_bool()); }
     // clang-format on
 
-    void init_cache(union number n)
-    {
-        if (is_integer()) {
-            *to_int_() = n.i;
-        } else if (is_floating()) {
-            *to_float_() = n.d;
-        }
-    }
-
     template <typename J, std::enable_if_t<std::is_same_v<std::decay_t<J>, json>, bool> = true>
     void copy_value(J&& j)
     {
@@ -779,6 +797,18 @@ class json
         } else {
             assert(false);
         }
+    }
+
+    template <typename T>
+    T strtonum() const
+    {
+        auto* s = to_str_();
+        T v{};
+        auto [_, ec] = std::from_chars(s->data(), s->data() + s->size(), v);
+        if (ec != std::errc{}) {
+            throw_invalid(__func__, "invalid numeric: " + *s);
+        }
+        return v;
     }
 
     /************************************************************************
@@ -962,14 +992,9 @@ class json
             len3 == 0) {
             throw_invalid(__func__, "invalid numeric: " + s);
         }
-        auto type = (len2 >= 0 || len3 > 0) ? value_t::floating : value_t::integral;
-        union number n;
-        auto [_, ec] =
-            type == value_t::integral ? std::from_chars(p, q, n.i) : std::from_chars(p, q, n.d);
-        if (ec != std::errc{}) {
-            throw_invalid(__func__, "invalid numeric: " + s);
-        }
-        return {json(type, std::move(s), n), ltrim(q)};
+        auto type =
+            (len2 >= 0 || len3 > 0) ? value_t::floating_uncached : value_t::integral_uncached;
+        return {json(type, std::move(s)), ltrim(q)};
     }
 
     static result_type parse_literal(const char* p)
@@ -1006,7 +1031,9 @@ class json
             break;
 
         case value_t::integral:
+        case value_t::integral_uncached:
         case value_t::floating:
+        case value_t::floating_uncached:
             ss += *to_str_();
             break;
 
