@@ -877,19 +877,48 @@ class json
 
     static result_type parse_string(const char* p, bool is_key = false)
     {
+        static constexpr const uint8_t pass[] = {
+            // clang-format off
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
+            // clang-format on
+        };
+
         assert(*p == '"');
         auto q = p + 1;
         std::string s;
         while (true) {
-            char c = *q++;
-            bool escape = false;
-            if ((unsigned char)c <= 0x1f) {
+            const char* r = q;
+            char c;
+            while (pass[((unsigned char)(c = *q++))])
+                ;
+            if ((unsigned char)c <= 0x1f || (unsigned char)c == 0x7f) {
                 throw_invalid(__func__, "invalid character", c);
-
-            } else if (c == '"') {
+            }
+            if (c == '"') {
+                if (is_key && q > r + 1) {
+                    s.append(r, q - r - 1);
+                }
                 break;
-
-            } else if (c == '\\') {
+            }
+            if (c == '\\') {
+                if (is_key && q > r + 1) {
+                    s.append(r, q - r - 1);
+                }
                 c = *q++;
                 if (c == 'u') {
                     if (is_key) {
@@ -899,10 +928,9 @@ class json
                     }
                     continue;
                 }
-                escape = true;
-            }
-            if (is_key) {
-                s.push_back(escape ? unescape_(c) : c);
+                if (is_key) {
+                    s.push_back(unescape_(c));
+                }
             }
         }
         if (!is_key) {
