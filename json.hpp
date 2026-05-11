@@ -5,6 +5,7 @@
 #include <cassert>
 #include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <initializer_list>
@@ -99,7 +100,7 @@ class json
             break;
 
         default:
-            assert(false);
+            __builtin_unreachable();
         }
 
         type_ = type;
@@ -206,7 +207,7 @@ class json
         alloc(value_t::object);
         auto* obj = to_obj_();
         for (auto&& [k, v] : list) {
-            keyvalue_visitor kvv{obj, k, {}};
+            keyvalue_visitor kvv{obj, unescape_(k), {}};
             std::visit(kvv, v);
         }
     }
@@ -287,7 +288,7 @@ class json
                 break;
 
             default:
-                assert(false);
+                __builtin_unreachable();
             }
         }
         return *this;
@@ -328,7 +329,7 @@ class json
                 break;
 
             default:
-                assert(false);
+                __builtin_unreachable();
             }
 
             rhs.reset();
@@ -348,7 +349,7 @@ class json
             throw_invalid(__func__, "unexpected char", *p);
         }
         j.textsize_ = p - s.data();
-        return std::move(j);
+        return j;
     }
 
     static json load(std::string_view file)
@@ -361,7 +362,7 @@ class json
     std::string to_string() const
     {
         std::string ss;
-        ss.reserve(std::max(textsize_, 4096UL));
+        ss.reserve(std::max(textsize_, (size_t)512));
         stringify_(ss);
         textsize_ = ss.size();
         return ss;
@@ -423,9 +424,8 @@ class json
     template <typename V, std::enable_if_t<!std::is_same_v<std::decay_t<V>, json>, bool> = true>
     json& operator=(V&& v)
     {
-        using std::swap;
         json rhs(std::forward<V>(v));
-        swap(*this, rhs);
+        std::swap(*this, rhs);
         return *this;
     }
 
@@ -455,7 +455,7 @@ class json
             return rhs.is_array() && *to_arr_() == *rhs.to_arr_();
 
         default:
-            assert(false);
+            __builtin_unreachable();
         }
     }
 
@@ -563,31 +563,31 @@ class json
     /************************************************************************
      * object operator
      */
-    bool contains(std::string_view key) const
+    bool contains(const std::string& key) const
     {
         if (auto* obj = to_obj_()) {
-            return obj->find(key.data()) != obj->end();
+            return obj->find(key) != obj->end();
         }
         throw_invalid(__func__, "not object");
     }
 
-    const json& at(std::string_view key) const
+    const json& at(const std::string& key) const
     {
         if (auto* obj = to_obj_()) {
-            return obj->at(key.data());
+            return obj->at(key);
         }
         throw_invalid(__func__, "not object");
     }
 
-    json& operator[](std::string_view key)
+    json& operator[](const std::string& key)
     {
         if (is_null()) {
             alloc(value_t::object);
         }
         if (auto* obj = to_obj_()) {
-            auto it = obj->find(key.data());
+            auto it = obj->find(key);
             if (it == obj->end()) {
-                std::tie(it, std::ignore) = obj->emplace(key, json{});
+                std::tie(it, std::ignore) = obj->emplace(unescape_(key), json{});
             }
             return it->second;
         }
@@ -691,6 +691,12 @@ class json
         {
             ++it;
             return *this;
+        }
+        array_iterator operator++(int)
+        {
+            auto v = *this;
+            ++(*this);
+            return v;
         }
         bool operator==(const array_iterator& rhs) const
         {
@@ -873,23 +879,31 @@ class json
     {
         assert(*p == '"');
         auto q = p + 1;
-        bool escape = false;
         std::string s;
         while (true) {
             char c = *q++;
-            if (0x00 <= c && c <= 0x1f) {
+            bool escape = false;
+            if ((unsigned char)c <= 0x1f) {
                 throw_invalid(__func__, "invalid character", c);
-            }
-            if (c == '\\' && !escape) {
-                escape = true;
-                continue;
-            } else if (c == '"' && !escape) {
+
+            } else if (c == '"') {
                 break;
+
+            } else if (c == '\\') {
+                c = *q++;
+                if (c == 'u') {
+                    if (is_key) {
+                        unescape_utf8(s, q);
+                    } else {
+                        (void)decode_cp(q);
+                    }
+                    continue;
+                }
+                escape = true;
             }
             if (is_key) {
                 s.push_back(escape ? unescape_(c) : c);
             }
-            escape = false;
         }
         if (!is_key) {
             s.assign(p + 1, q - p - 2);
@@ -903,7 +917,7 @@ class json
         if (*q == '-') {
             ++q;
         }
-        ssize_t len1 = -1, len2 = -1, len3 = -1;
+        int len1 = -1, len2 = -1, len3 = -1;
         q += (len1 = std::strspn(q, "0123456789"));  // int
         if (*q == '.') {
             q += (len2 = std::strspn(++q, "0123456789"));  // frac
@@ -916,7 +930,8 @@ class json
             q += (len3 = std::strspn(q, "0123456789"));
         }
         std::string s(p, q - p);
-        if (len1 == 0 || (len1 >= 2 && p[0] == '0') || len2 == 0 || len3 == 0) {
+        if (len1 == 0 || (len1 >= 2 && (p[0] == '-' ? p[1] : p[0]) == '0') || len2 == 0 ||
+            len3 == 0) {
             throw_invalid(__func__, "invalid numeric: " + s);
         }
         auto type = (len2 >= 0 || len3 > 0) ? value_t::floating : value_t::integral;
@@ -1005,7 +1020,7 @@ class json
         }
 
         default:
-            assert(false);
+            __builtin_unreachable();
         }
     }
 
@@ -1022,21 +1037,20 @@ class json
 
     static void escape_(std::string& ss, std::string_view s)
     {
+        static constexpr const char* const cntrl[] = {
+            "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
+            "\\b",     "\\t",     "\\n",     "\\u000B", "\\f",     "\\r",     "\\u000E", "\\u000F",
+            "\\u0010", "\\u0011", "\\u0012", "\\u0013", "\\u0014", "\\u0015", "\\u0016", "\\u0017",
+            "\\u0018", "\\u0019", "\\u001A", "\\u001B", "\\u001C", "\\u001D", "\\u001E", "\\u001F",
+        };
+
         for (auto c : s) {
             if (c == '"') {
                 ss.append("\\\"");
             } else if (c == '\\') {
                 ss.append("\\\\");
-            } else if (c == '\b') {
-                ss.append("\\b");
-            } else if (c == '\f') {
-                ss.append("\\f");
-            } else if (c == '\n') {
-                ss.append("\\n");
-            } else if (c == '\r') {
-                ss.append("\\r");
-            } else if (c == '\t') {
-                ss.append("\\t");
+            } else if ((unsigned char)c <= 0x1f) {
+                ss.append(cntrl[(unsigned char)c]);
             } else {
                 ss.push_back(c);
             }
@@ -1070,18 +1084,7 @@ class json
     static void unescape_utf8(std::string& u, const char*& p)
     {
         const char* start = p;
-        unsigned cp = 0;
-        for (int i = 0; i < 4; ++i) {
-            char c = *p++;
-            auto h = ('0' <= c && c <= '9')   ? c - '0'
-                     : ('a' <= c && c <= 'f') ? c - 'a' + 10
-                     : ('A' <= c && c <= 'F') ? c - 'A' + 10
-                                              : -1;
-            if (h < 0) {
-                throw_invalid(__func__, "invalide code point", c);
-            }
-            cp = (cp << 4) + h;
-        }
+        auto cp = decode_cp(p);
 
         if (cp <= 0x7f) {
             u.push_back((char)cp);
@@ -1100,6 +1103,23 @@ class json
         }
     }
 
+    static unsigned decode_cp(const char*& p)
+    {
+        unsigned cp = 0;
+        for (int i = 0; i < 4; ++i) {
+            char c = *p++;
+            auto h = ('0' <= c && c <= '9')   ? c - '0'
+                     : ('a' <= c && c <= 'f') ? c - 'a' + 10
+                     : ('A' <= c && c <= 'F') ? c - 'A' + 10
+                                              : -1;
+            if (h < 0) {
+                throw_invalid(__func__, "invalid code point", c);
+            }
+            cp = (cp << 4) + h;
+        }
+        return cp;
+    }
+
     static char unescape_(char c)
     {
         // XXX invalid/unknown escape sequence?
@@ -1115,7 +1135,7 @@ class json
         case 't':
             return '\t';
         case '\0':
-            throw_invalid(__func__, "unexpectd eof");
+            throw_invalid(__func__, "unexpected eof");
         default:
             return c;
         }
@@ -1150,6 +1170,12 @@ struct json::object_iterator
         ++it;
         return *this;
     }
+    json::object_iterator operator++(int)
+    {
+        auto kv = *this;
+        ++(*this);
+        return kv;
+    }
     bool operator==(const json::object_iterator& rhs) const
     {
         return it == rhs.it;
@@ -1176,11 +1202,19 @@ template <>
 struct std::iterator_traits<tbd::json::array_iterator>
 {
     using iterator_category = std::forward_iterator_tag;
+    using value_type = tbd::json;
+    using difference_type = std::ptrdiff_t;
+    using pointer = tbd::json*;
+    using reference = tbd::json&;
 };
 template <>
 struct std::iterator_traits<tbd::json::object_iterator>
 {
-    using iterator_category = std::forward_iterator_tag;
+    using iterator_category = std::input_iterator_tag;
+    using value_type = tbd::json::item_ref;
+    using difference_type = std::ptrdiff_t;
+    using pointer = void;
+    using reference = tbd::json::item_ref;
 };
 
 #endif
