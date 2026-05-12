@@ -27,27 +27,12 @@ class json
     using array_type = std::vector<json>;
 
   private:
-    [[noreturn]] static void throw_invalid(const std::string& f, std::string_view m, int c = -1)
+    [[noreturn]] static void throw_invalid(const std::string& f, std::string_view m)
     {
-        static constexpr const char hex[] = "0123456789ABCDEF";
-        std::string what = f + ": " + m.data();
-        if (c >= 0) {
-            if (c <= 0x1f) {
-                what.append(" <");
-                what.push_back(hex[c >> 4]);
-                what.push_back(hex[c & 0x0f]);
-                what.append("h>");
-            } else {
-                what.append(" (`");
-                what.push_back((char)c);
-                what.append("')");
-            }
-        }
-        throw std::invalid_argument(what);
+        throw std::invalid_argument(f + ": " + m.data());
     }
 
     using value_type = std::variant<std::monostate, bool, int64_t, double, std::string, json>;
-    using result_type = std::pair<json, const char*>;
     template <typename T>
     inline static constexpr bool string_like =
         std::is_convertible_v<std::decay_t<T>, std::string_view>;
@@ -355,12 +340,9 @@ class json
 
     static json parse(const std::string& s)
     {
-        auto [j, p] = parse_value(ltrim(s.data()));
-        p = ltrim(p);
-        if (*p != '\0') {
-            throw_invalid(__func__, "unexpected char", *p);
-        }
-        j.textsize_ = p - s.data();
+        parser p(s);
+        auto j = p.parse();
+        j.textsize_ = p.offset();
         return j;
     }
 
@@ -633,10 +615,10 @@ class json
     }
 #endif
 
-    void erase(std::string_view key)
+    void erase(const std::string& key)
     {
         if (auto* obj = to_obj_()) {
-            obj->erase(key.data());
+            obj->erase(key);
             return;
         }
         throw_invalid(__func__, "not object");
@@ -812,211 +794,6 @@ class json
     }
 
     /************************************************************************
-     * parse
-     */
-    static result_type parse_value(const char* p)
-    {
-        switch (*p) {
-        case '{':
-            return parse_object(p);
-
-        case '[':
-            return parse_array(p);
-
-        case '"':
-            return parse_string(p);
-
-        // clang-format off
-        case '0': case '1': case '2': case '3': case '4': case '5':
-        case '6': case '7': case '8': case '9': case '-': case '.':
-            // clang-format on
-            return parse_number(p);
-
-        // clang-format off
-        case 't': case 'f': case 'n':
-            // clang-format on
-            return parse_literal(p);
-
-        case '\0':
-            return {json{}, p};
-
-        default:
-            throw_invalid(__func__, "unexpected char", *p);
-        }
-    }
-
-    static result_type parse_object(const char* p)
-    {
-        assert(*p == '{');
-        auto q = ltrim(p + 1);
-        json j(value_t::object);
-        auto* obj = j.to_obj_();
-        bool comma = false;
-        while (*q != '}') {
-            if (*q != '"') {
-                throw_invalid(__func__, "key not start with quote", *q);
-            }
-
-            auto [k, r] = parse_string(q, true);
-            q = r;
-            if (*q++ != ':') {
-                throw_invalid(__func__, "key-value not separated with colon", *(q - 1));
-            }
-            auto [v, s] = parse_value(ltrim(q));
-            q = s;
-            obj->emplace(std::move(*k.to_str_()), std::move(v));
-
-            q = ltrim((comma = *q == ',') ? q + 1 : q);
-            if (!comma) {
-                break;
-            }
-        }
-        if (comma) {
-            throw_invalid(__func__, "next key-value expected", *q);
-        }
-        if (*q != '}') {
-            throw_invalid(__func__, "object not end with right-brace", *q);
-        }
-        return {std::move(j), ltrim(q + 1)};
-    }
-
-    static result_type parse_array(const char* p)
-    {
-        assert(*p == '[');
-        auto q = ltrim(p + 1);
-        json j(value_t::array);
-        auto* arr = j.to_arr_();
-        bool comma = false;
-        while (*q != ']') {
-            auto [v, r] = parse_value(q);
-            q = r;
-            arr->emplace_back(std::move(v));
-            q = ltrim((comma = *q == ',') ? q + 1 : q);
-            if (!comma) {
-                break;
-            }
-        }
-        if (comma) {
-            throw_invalid(__func__, "next value expected", *q);
-        }
-        if (*q != ']') {
-            throw_invalid(__func__, "array not end with right-bracket", *q);
-        }
-        return {std::move(j), ltrim(q + 1)};
-    }
-
-    static result_type parse_string(const char* p, bool is_key = false)
-    {
-        static constexpr const uint8_t pass[] = {
-            // clang-format off
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
-            // clang-format on
-        };
-
-        assert(*p == '"');
-        auto q = p + 1;
-        std::string s;
-        while (true) {
-            const char* r = q;
-            char c;
-            while (pass[((unsigned char)(c = *q++))])
-                ;
-            if ((unsigned char)c <= 0x1f || (unsigned char)c == 0x7f) {
-                throw_invalid(__func__, "invalid character", c);
-            }
-            if (c == '"') {
-                if (is_key && q > r + 1) {
-                    s.append(r, q - r - 1);
-                }
-                break;
-            }
-            if (c == '\\') {
-                if (is_key && q > r + 1) {
-                    s.append(r, q - r - 1);
-                }
-                c = *q++;
-                if (c == 'u') {
-                    if (is_key) {
-                        unescape_utf8(s, q);
-                    } else {
-                        (void)decode_cp(q);
-                    }
-                    continue;
-                }
-                if (is_key) {
-                    s.push_back(unescape_(c));
-                }
-            }
-        }
-        if (!is_key) {
-            s.assign(p + 1, q - p - 2);
-        }
-        return {json(value_t::string, std::move(s)), ltrim(q)};
-    }
-
-    static result_type parse_number(const char* p)
-    {
-        auto q = p;
-        if (*q == '-') {
-            ++q;
-        }
-        int len1 = -1, len2 = -1, len3 = -1;
-        q += (len1 = std::strspn(q, "0123456789"));  // int
-        if (*q == '.') {
-            q += (len2 = std::strspn(++q, "0123456789"));  // frac
-        }
-        if (*q == 'e' || *q == 'E') {  // exp
-            ++q;
-            if (*q == '+' || *q == '-') {
-                ++q;
-            }
-            q += (len3 = std::strspn(q, "0123456789"));
-        }
-        std::string s(p, q - p);
-        if (len1 == 0 || (len1 >= 2 && (p[0] == '-' ? p[1] : p[0]) == '0') || len2 == 0 ||
-            len3 == 0) {
-            throw_invalid(__func__, "invalid numeric: " + s);
-        }
-        auto type =
-            (len2 >= 0 || len3 > 0) ? value_t::floating_uncached : value_t::integral_uncached;
-        return {json(type, std::move(s)), ltrim(q)};
-    }
-
-    static result_type parse_literal(const char* p)
-    {
-        if (std::strncmp(p, "true", 4) == 0) {
-            return {json(value_t::boolean, true), ltrim(p + 4)};
-        }
-        if (std::strncmp(p, "false", 5) == 0) {
-            return {json(value_t::boolean, false), ltrim(p + 5)};
-        }
-        if (std::strncmp(p, "null", 4) == 0) {
-            return {json{}, ltrim(p + 4)};
-        }
-        throw_invalid(__func__, "unexpected literal", *p);
-    }
-
-    static const char* ltrim(const char* p) noexcept
-    {
-        return p + std::strspn(p, " \t\r\n");
-    }
-
-    /************************************************************************
      * stringify
      */
     void stringify_(std::string& ss) const
@@ -1168,7 +945,7 @@ class json
                      : ('A' <= c && c <= 'F') ? c - 'A' + 10
                                               : -1;
             if (h < 0) {
-                throw_invalid(__func__, "invalid code point", c);
+                throw_invalid(__func__, "invalid code point (`" + std::string(1, c) + "')");
             }
             cp = (cp << 4) + h;
         }
@@ -1195,6 +972,304 @@ class json
             return c;
         }
     }
+
+    /************************************************************************
+     * parser
+     */
+    class parse_error : public std::invalid_argument
+    {
+      public:
+        explicit parse_error(const std::string& what)
+            : std::invalid_argument(what)
+        {
+        }
+    };
+
+    struct parser;
+    struct stack
+    {
+        struct save
+        {
+            parser* p;
+            std::string save_;
+            ~save()
+            {
+                p->fn_ = std::move(save_);
+            }
+        };
+
+        parser* p;
+        save push(std::string f)
+        {
+            save s{p, std::move(p->fn_)};
+            p->fn_ = std::move(f);
+            return s;
+        }
+    };
+
+    struct parser
+    {
+        const char *base_, *p_;
+        std::string fn_;
+        stack s_{this};
+
+        parser(std::string_view s)
+            : base_(s.data())
+            , p_(base_)
+        {
+            ltrim();
+        }
+
+        size_t offset() const
+        {
+            return p_ - base_;
+        }
+
+        json parse()
+        {
+            auto _ = s_.push(__func__);
+            auto j = parse_value();
+            if (*p_ != '\0') {
+                throw_parser("unexpected char");
+            }
+            return j;
+        }
+
+        json parse_value()
+        {
+            auto _ = s_.push(__func__);
+            switch (*p_) {
+            case '{':
+                return parse_object();
+
+            case '[':
+                return parse_array();
+
+            case '"':
+                return parse_string();
+
+            // clang-format off
+            case '0': case '1': case '2': case '3': case '4': case '5':
+            case '6': case '7': case '8': case '9': case '-': case '.':
+                // clang-format on
+                return parse_number();
+
+            // clang-format off
+            case 't': case 'f': case 'n':
+                // clang-format on
+                return parse_literal();
+
+            case '\0':
+                return json{};
+
+            default:
+                throw_parser("unexpected char");
+            }
+        }
+
+        json parse_object()
+        {
+            auto _ = s_.push(__func__);
+            assert(*p_ == '{');
+            ltrim(1);
+            json j(value_t::object);
+            auto* obj = j.to_obj_();
+            bool comma = false;
+            while (*p_ != '}') {
+                if (*p_ != '"') {
+                    throw_parser("key not start with quote");
+                }
+
+                auto k = parse_string(true);
+                if (*p_++ != ':') {
+                    throw_parser("key-value not separated with colon", -1);
+                }
+                ltrim();
+                auto v = parse_value();
+                obj->emplace(std::move(*k.to_str_()), std::move(v));
+
+                ltrim((comma = *p_ == ',') ? 1 : 0);
+                if (!comma) {
+                    break;
+                }
+            }
+            if (comma) {
+                throw_parser("next key-value expected");
+            }
+            if (*p_ != '}') {
+                throw_parser("object not end with right-brace");
+            }
+            ltrim(1);
+            return j;
+        }
+
+        json parse_array()
+        {
+            auto _ = s_.push(__func__);
+            assert(*p_ == '[');
+            ltrim(1);
+            json j(value_t::array);
+            auto* arr = j.to_arr_();
+            bool comma = false;
+            while (*p_ != ']') {
+                auto v = parse_value();
+                arr->emplace_back(std::move(v));
+                ltrim((comma = *p_ == ',') ? 1 : 0);
+                if (!comma) {
+                    break;
+                }
+            }
+            if (comma) {
+                throw_parser("next value expected");
+            }
+            if (*p_ != ']') {
+                throw_parser("array not end with right-bracket");
+            }
+            ltrim(1);
+            return j;
+        }
+
+        json parse_string(bool is_key = false)
+        {
+            auto _ = s_.push(__func__);
+            static constexpr const uint8_t pass[] = {
+                // clang-format off
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
+                // clang-format on
+            };
+
+            assert(*p_ == '"');
+            auto base = ++p_;
+            std::string s;
+            while (true) {
+                auto* q = p_;
+                char c;
+                while (pass[((unsigned char)(c = *p_++))])
+                    ;
+                if ((unsigned char)c <= 0x1f || (unsigned char)c == 0x7f) {
+                    throw_parser("invalid character");
+                }
+                if (c == '"') {
+                    if (is_key && p_ > q + 1) {
+                        s.append(q, p_ - q - 1);
+                    }
+                    break;
+                }
+                if (c == '\\') {
+                    if (is_key && p_ > q + 1) {
+                        s.append(q, p_ - q - 1);
+                    }
+                    c = *p_++;
+                    if (c == 'u') {
+                        if (is_key) {
+                            unescape_utf8(s, p_);
+                        } else {
+                            (void)decode_cp(p_);
+                        }
+                        continue;
+                    }
+                    if (is_key) {
+                        s.push_back(json::unescape_(c));
+                    }
+                }
+            }
+            if (!is_key) {
+                s.assign(base, p_ - base - 1);
+            }
+            ltrim();
+            return json(value_t::string, std::move(s));
+        }
+
+        json parse_number()
+        {
+            auto _ = s_.push(__func__);
+            auto base = p_;
+            if (*p_ == '-') {
+                ++p_;
+            }
+            int len1 = -1, len2 = -1, len3 = -1;
+            p_ += (len1 = std::strspn(p_, "0123456789"));  // int
+            if (*p_ == '.') {
+                p_ += (len2 = std::strspn(++p_, "0123456789"));  // frac
+            }
+            if (*p_ == 'e' || *p_ == 'E') {  // exp
+                ++p_;
+                if (*p_ == '+' || *p_ == '-') {
+                    ++p_;
+                }
+                p_ += (len3 = std::strspn(p_, "0123456789"));
+            }
+            std::string s(base, p_ - base);
+            if (len1 == 0 || (len1 >= 2 && (base[0] == '-' ? base[1] : base[0]) == '0') ||
+                len2 == 0 || len3 == 0) {
+                throw_parser("invalid numeric: " + s);
+            }
+            auto type =
+                (len2 >= 0 || len3 > 0) ? value_t::floating_uncached : value_t::integral_uncached;
+            ltrim();
+            return json(type, std::move(s));
+        }
+
+        json parse_literal()
+        {
+            auto _ = s_.push(__func__);
+            if (std::strncmp(p_, "true", 4) == 0) {
+                ltrim(4);
+                return json(value_t::boolean, true);
+            }
+            if (std::strncmp(p_, "false", 5) == 0) {
+                ltrim(5);
+                return json(value_t::boolean, false);
+            }
+            if (std::strncmp(p_, "null", 4) == 0) {
+                ltrim(4);
+                return json{};
+            }
+            throw_parser("unexpected literal");
+        }
+
+        void ltrim(ptrdiff_t offset = 0) noexcept
+        {
+            p_ += offset + std::strspn(p_ + offset, " \t\r\n");
+        }
+
+        [[noreturn]] void throw_parser(std::string_view m, ptrdiff_t adjust = 0)
+        {
+            static constexpr const char hex[] = "0123456789ABCDEF";
+            std::string what = fn_ + ": " + m.data();
+            auto c = *(p_ + adjust);
+            if (c >= 0) {
+                if (c <= 0x1f) {
+                    what.append(" <");
+                    what.push_back(hex[c >> 4]);
+                    what.push_back(hex[c & 0x0f]);
+                    what.append("h>");
+                } else {
+                    what.append(" (`");
+                    what.push_back((char)c);
+                    what.append("')");
+                }
+            }
+            what.append(", offset ");
+            what.append(std::to_string(offset()));
+            throw parse_error(what);
+        }
+    };
 };
 
 static_assert(sizeof(json::object_type) <= json::VALUE_BUFFER_SIZE);
