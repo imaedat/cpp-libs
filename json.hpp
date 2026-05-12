@@ -625,7 +625,6 @@ class json
     }
 
     // --- object iterator ---
-    struct item_ref;
     struct object_iterator;
     struct object_view
     {
@@ -1278,22 +1277,30 @@ static_assert(sizeof(json::array_type) <= json::VALUE_BUFFER_SIZE);
 /****************************************************************************
  * object iterator
  */
-struct json::item_ref
-{
-    const std::string& key;
-    json& value;
-};
-
 struct json::object_iterator
 {
+    using value_proxy = std::pair<const std::string&, json&>;
+    struct arrow_proxy
+    {
+        value_proxy v;
+        value_proxy* operator->()
+        {
+            return &v;
+        }
+    };
+
     json::object_type::iterator it;
     explicit object_iterator(json::object_type::iterator i)
         : it(i)
     {
     }
-    json::item_ref operator*() const
+    value_proxy operator*() const
     {
         return {it->first, it->second};
+    }
+    arrow_proxy operator->() const
+    {
+        return arrow_proxy{{it->first, it->second}};
     }
     json::object_iterator& operator++()
     {
@@ -1341,10 +1348,10 @@ template <>
 struct std::iterator_traits<tbd::json::object_iterator>
 {
     using iterator_category = std::input_iterator_tag;
-    using value_type = tbd::json::item_ref;
+    using value_type = tbd::json::object_iterator::value_proxy;
     using difference_type = std::ptrdiff_t;
-    using pointer = void;
-    using reference = tbd::json::item_ref;
+    using pointer = tbd::json::object_iterator::arrow_proxy;
+    using reference = tbd::json::object_iterator::value_proxy;
 };
 
 #endif
