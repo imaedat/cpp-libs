@@ -912,9 +912,17 @@ class json
         return u;
     }
 
+    /**
+     * 0000h - 007Fh : 1B
+     * 0080h - 07FFh : 2B
+     * 0800h - D7FFh : 3B
+     * D800h - DBFFh : high surrogate
+     * DC00h - DFFFh : low surrogate
+     * E000h - FFFFh : 3B
+     */
     static void unescape_utf8(std::string& u, const char*& p)
     {
-        const char* start = p;
+        const char* q = p;
         auto cp = decode_cp(p);
 
         if (cp <= 0x7f) {
@@ -927,14 +935,27 @@ class json
             u.push_back((char)(0x80 | ((cp >> 6) & 0x3f)));
             u.push_back((char)(0x80 | (cp & 0x3f)));
         } else {
-            // XXX unhandled
-            u.push_back('\\');
-            u.push_back('u');
-            u.append(start, 4);
+            if (cp >= 0xdc00) {
+                throw_invalid(__func__, "lone low surrogate: " + std::string(q, 4));
+            }
+            if (std::strncmp(p, "\\u", 2) != 0) {
+                throw_invalid(__func__, "lone high surrogate: " + std::string(q, 4));
+            }
+            p += 2;
+            q = p;
+            auto lo = decode_cp(p);
+            if (lo < 0xdc00 || 0xdfff < lo) {
+                throw_invalid(__func__, "high surrogate followed by high: " + std::string(q, 4));
+            }
+            cp = (((cp - 0xd800) << 10) | (lo - 0xdc00)) + 0x10000;
+            u.push_back((char)(0xf0 | ((cp >> 18) & 0x07)));
+            u.push_back((char)(0x80 | ((cp >> 12) & 0x3f)));
+            u.push_back((char)(0x80 | ((cp >> 6) & 0x3f)));
+            u.push_back((char)(0x80 | (cp & 0x3f)));
         }
     }
 
-    static unsigned decode_cp(const char*& p)
+    static uint32_t decode_cp(const char*& p)
     {
         unsigned cp = 0;
         for (int i = 0; i < 4; ++i) {
