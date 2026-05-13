@@ -13,7 +13,11 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -96,27 +100,41 @@ class json
     }
 
     template <typename V>
-    void initialize(value_t type, V&& v, union number n = {})
+    void alloc_with(value_t type, V&& v, union number n = {})
     {
-        alloc(type);
         if constexpr (std::is_same_v<std::decay_t<V>, bool>) {
-            *to_bool_() = v;
+            assert(type == value_t::boolean);
+            new (buffer_) bool(v);
+            type_ = type;
+
         } else if constexpr (string_like<V>) {
-            if (type_ == value_t::unescaped_string) {
+            assert(type == value_t::integral || type == value_t::integral_uncached ||
+                   type == value_t::floating || type == value_t::floating_uncached ||
+                   type == value_t::string || type == value_t::unescaped_string);
+            if (type == value_t::unescaped_string) {
+                new (buffer_) std::string(escape_(std::forward<V>(v)));
                 type_ = value_t::string;
-                *to_str_() = escape_(v);
+
             } else {
-                *to_str_() = std::forward<V>(v);
+                new (buffer_) std::string(std::forward<V>(v));
+                type_ = type;
                 if (type_ == value_t::integral) {
-                    *to_int_() = n.i;
+                    cache_number<int64_t>(this, n.i);
                 } else if (type_ == value_t::floating) {
-                    *to_float_() = n.d;
+                    cache_number<double>(this, n.d);
                 }
             }
+
         } else if constexpr (std::is_same_v<std::decay_t<V>, object_type>) {
-            operator=(std::forward<V>(v));
+            assert(type == value_t::object);
+            new (buffer_) object_type(std::forward<V>(v));
+            type_ = type;
+
         } else if constexpr (std::is_same_v<std::decay_t<V>, array_type>) {
-            operator=(std::forward<V>(v));
+            assert(type == value_t::array);
+            new (buffer_) array_type(std::forward<V>(v));
+            type_ = type;
+
         } else {
             static_assert([] { return false; }(), "invalid argument");
         }
@@ -130,7 +148,7 @@ class json
     template <typename V>
     json(value_t type, V&& v, union number n = {})
     {
-        initialize(type, std::forward<V>(v), n);
+        alloc_with(type, std::forward<V>(v), n);
     }
 
   public:
@@ -147,15 +165,15 @@ class json
     {
         union number n;
         if constexpr (std::is_same_v<std::decay_t<V>, bool>) {
-            initialize(value_t::boolean, v);
+            alloc_with(value_t::boolean, v);
         } else if constexpr (std::is_integral_v<std::decay_t<V>>) {
             n.i = v;
-            initialize(value_t::integral, std::to_string(v), n);
+            alloc_with(value_t::integral, std::to_string(v), n);
         } else if constexpr (std::is_floating_point_v<std::decay_t<V>>) {
             n.d = v;
-            initialize(value_t::floating, std::to_string(v), n);
+            alloc_with(value_t::floating, to_string(v), n);
         } else if constexpr (string_like<V>) {
-            initialize(value_t::unescaped_string, std::forward<V>(v));
+            alloc_with(value_t::unescaped_string, std::forward<V>(v));
         } else if constexpr (std::is_same_v<std::decay_t<V>, json>) {
             operator=(std::forward<V>(v));
         } else {
@@ -169,32 +187,14 @@ class json
             object_type* obj;
             const std::string& k;
             union number n;
-            void operator()(std::monostate)
-            {
-                obj->emplace(k, json(value_t::null));
-            }
-            void operator()(bool v)
-            {
-                obj->emplace(k, json(value_t::boolean, v));
-            }
-            void operator()(int64_t v)
-            {
-                n.i = v;
-                obj->emplace(k, json(value_t::integral, std::to_string(v), n));
-            }
-            void operator()(double v)
-            {
-                n.d = v;
-                obj->emplace(k, json(value_t::floating, std::to_string(v), n));
-            }
-            void operator()(const std::string& v)
-            {
-                obj->emplace(k, json(value_t::unescaped_string, v));
-            }
-            void operator()(const json& v)
-            {
-                obj->emplace(k, v);
-            }
+            // clang-format off
+            void operator()(std::monostate) { obj->emplace(k, json(value_t::null)); }
+            void operator()(bool v) { obj->emplace(k, json(value_t::boolean, v)); }
+            void operator()(int64_t v) { n.i = v; obj->emplace(k, json(value_t::integral, std::to_string(v), n)); }
+            void operator()(double v) { n.d = v; obj->emplace(k, json(value_t::floating, to_string(v), n)); }
+            void operator()(const std::string& v) { obj->emplace(k, json(value_t::unescaped_string, v)); }
+            void operator()(const json& v) { obj->emplace(k, v); }
+            // clang-format on
         };
 
         alloc(value_t::object);
@@ -210,32 +210,14 @@ class json
         {
             array_type* arr;
             union number n;
-            void operator()(std::monostate)
-            {
-                arr->emplace_back(json(value_t::null));
-            }
-            void operator()(bool v)
-            {
-                arr->emplace_back(json(value_t::boolean, v));
-            }
-            void operator()(int64_t v)
-            {
-                n.i = v;
-                arr->emplace_back(json(value_t::integral, std::to_string(v), n));
-            }
-            void operator()(double v)
-            {
-                n.d = v;
-                arr->emplace_back(json(value_t::floating, std::to_string(v), n));
-            }
-            void operator()(const std::string& v)
-            {
-                arr->emplace_back(json(value_t::unescaped_string, v));
-            }
-            void operator()(const json& v)
-            {
-                arr->emplace_back(v);
-            }
+            // clang-format off
+            void operator()(std::monostate) { arr->emplace_back(json(value_t::null)); }
+            void operator()(bool v) { arr->emplace_back(json(value_t::boolean, v)); }
+            void operator()(int64_t v) { n.i = v; arr->emplace_back(json(value_t::integral, std::to_string(v), n)); }
+            void operator()(double v) { n.d = v; arr->emplace_back(json(value_t::floating, to_string(v), n)); }
+            void operator()(const std::string& v) { arr->emplace_back(json(value_t::unescaped_string, v)); }
+            void operator()(const json& v) { arr->emplace_back(v); }
+            // clang-format on
         };
 
         alloc(value_t::array);
@@ -245,97 +227,98 @@ class json
             std::visit(vv, v);
         }
     }
+
+  private:
+    template <typename T>
+    void forward_(T&& rhs)
+    {
+        switch (rhs.type_) {
+        case value_t::null:
+            break;
+
+        case value_t::boolean:
+            new (buffer_) bool(*rhs.to_bool_());
+            break;
+
+        case value_t::integral:
+        case value_t::integral_uncached:
+        case value_t::floating:
+        case value_t::floating_uncached:
+        case value_t::string:
+            if constexpr (std::is_const_v<std::remove_reference_t<T>>) {
+                new (buffer_) std::string(std::forward<const std::string&>(*rhs.to_str_()));
+            } else {
+                new (buffer_) std::string(std::forward<std::string&&>(*rhs.to_str_()));
+            }
+            copy_number(rhs);
+            break;
+
+        case value_t::object:
+            if constexpr (std::is_const_v<std::remove_reference_t<T>>) {
+                new (buffer_) object_type(std::forward<const object_type&>(*rhs.to_obj_()));
+            } else {
+                new (buffer_) object_type(std::forward<object_type&&>(*rhs.to_obj_()));
+            }
+            break;
+
+        case value_t::array:
+            if constexpr (std::is_const_v<std::remove_reference_t<T>>) {
+                new (buffer_) array_type(std::forward<const array_type&>(*rhs.to_arr_()));
+            } else {
+                new (buffer_) array_type(std::forward<array_type&&>(*rhs.to_arr_()));
+            }
+            break;
+
+        default:
+            __builtin_unreachable();
+        }
+
+        type_ = rhs.type_;
+        textsize_ = rhs.textsize_;
+    }
+    void move_(json&& rhs) noexcept
+    {
+        assert(is_null());
+        forward_(std::move(rhs));
+        rhs.reset();
+    }
+
+  public:
     json(const json& rhs)
     {
-        *this = rhs;
+        forward_(rhs);
+    }
+    json(json&& rhs) noexcept
+    {
+        move_(std::move(rhs));
     }
     json& operator=(const json& rhs)
     {
         if (this != &rhs) {
-            reset();
-            type_ = rhs.type_;
-            textsize_ = rhs.textsize_;
-            switch (type_) {
-            case value_t::null:
-                break;
-
-            case value_t::boolean:
-                new (buffer_) bool(*rhs.to_bool_());
-                break;
-
-            case value_t::integral:
-            case value_t::floating:
-                copy_value(rhs);
-                [[fallthrough]];
-
-            case value_t::integral_uncached:
-            case value_t::floating_uncached:
-            case value_t::string:
-                new (buffer_) std::string(*rhs.to_str_());
-                break;
-
-            case value_t::object:
-                new (buffer_) object_type(*rhs.to_obj_());
-                break;
-
-            case value_t::array:
-                new (buffer_) array_type(*rhs.to_arr_());
-                break;
-
-            default:
-                __builtin_unreachable();
-            }
+            json tmp(rhs);
+            swap(*this, tmp);
         }
         return *this;
-    }
-    json(json&& rhs) noexcept
-    {
-        *this = std::move(rhs);
     }
     json& operator=(json&& rhs) noexcept
     {
         if (this != &rhs) {
-            reset();
-            type_ = rhs.type_;
-            textsize_ = rhs.textsize_;
-            switch (type_) {
-            case value_t::null:
-                break;
-
-            case value_t::boolean:
-                new (buffer_) bool(*rhs.to_bool_());
-                break;
-
-            case value_t::integral:
-            case value_t::floating:
-                copy_value(rhs);
-                [[fallthrough]];
-
-            case value_t::integral_uncached:
-            case value_t::floating_uncached:
-            case value_t::string:
-                new (buffer_) std::string(std::move(*rhs.to_str_()));
-                break;
-
-            case value_t::object:
-                new (buffer_) object_type(std::move(*rhs.to_obj_()));
-                break;
-
-            case value_t::array:
-                new (buffer_) array_type(std::move(*rhs.to_arr_()));
-                break;
-
-            default:
-                __builtin_unreachable();
-            }
-
-            rhs.reset();
+            swap(*this, rhs);
         }
         return *this;
     }
     ~json()
     {
         reset();
+    }
+
+    friend void swap(json& lhs, json& rhs) noexcept
+    {
+        if (&lhs != &rhs) {
+            json tmp(std::move(lhs));
+            lhs.move_(std::move(rhs));
+            rhs.move_(std::move(tmp));
+        }
     }
 
     static json parse(const std::string& s)
@@ -348,7 +331,11 @@ class json
 
     static json load(std::string_view file)
     {
+        using namespace std::string_literals;
         std::ifstream ifs(file.data());
+        if (!ifs) {
+            throw_invalid(__func__, "cannot open file: "s + file.data());
+        }
         using iterator = std::istreambuf_iterator<char>;
         return parse(std::string(iterator(ifs), iterator()));
     }
@@ -401,7 +388,7 @@ class json
     {
         switch (type_) {
         case value_t::string:
-            return to_str_()->size();
+            return get<std::string>().size();
 
         case value_t::object:
             return to_obj_()->size();
@@ -421,7 +408,7 @@ class json
     json& operator=(V&& v)
     {
         json rhs(std::forward<V>(v));
-        std::swap(*this, rhs);
+        swap(*this, rhs);
         return *this;
     }
 
@@ -471,13 +458,10 @@ class json
             }
 
         } else if constexpr (std::is_arithmetic_v<T>) {
-            auto* self = const_cast<json*>(this);
             if (type_ == value_t::integral_uncached) {
-                *self->to_int_() = strtonum<int64_t>();
-                self->type_ = value_t::integral;
+                cache_number<int64_t>(const_cast<json*>(this), to_number<int64_t>());
             } else if (type_ == value_t::floating_uncached) {
-                *self->to_float_() = strtonum<double>();
-                self->type_ = value_t::floating;
+                cache_number<double>(const_cast<json*>(this), to_number<double>());
             }
 
             if (auto* num = to_int_()) {
@@ -596,7 +580,7 @@ class json
         if (auto* obj = to_obj_()) {
             auto it = obj->find(key);
             if (it == obj->end()) {
-                std::tie(it, std::ignore) = obj->emplace(unescape_(key), json{});
+                std::tie(it, std::ignore) = obj->emplace(key, json{});
             }
             return it->second;
         }
@@ -749,8 +733,8 @@ class json
     }
 
     // clang-format off
-          void* numbuffer_()       { return std::launder(buffer_ + num_offset); }
-    const void* numbuffer_() const { return std::launder(buffer_ + num_offset); }
+          void* numbuffer_()       { return buffer_ + num_offset; }
+    const void* numbuffer_() const { return buffer_ + num_offset; }
 
     bool holds_as_string() const { return is_integer() || is_floating() || is_string(); }
 
@@ -768,20 +752,35 @@ class json
     const bool*        to_bool_() const  { return cast_<bool>(is_bool()); }
     // clang-format on
 
+    /************************************************************************
+     * numbers
+     */
     template <typename J, std::enable_if_t<std::is_same_v<std::decay_t<J>, json>, bool> = true>
-    void copy_value(J&& j)
+    void copy_number(J&& j)
     {
-        if (is_integer()) {
-            *to_int_() = *j.to_int_();
-        } else if (is_floating()) {
-            *to_float_() = *j.to_float_();
-        } else {
-            assert(false);
+        if (j.type_ == value_t::integral) {
+            *(int64_t*)numbuffer_() = *j.to_int_();
+        } else if (j.type_ == value_t::floating) {
+            *(double*)numbuffer_() = *j.to_float_();
         }
     }
 
     template <typename T>
-    T strtonum() const
+    static void cache_number(json* j, T v)
+    {
+        if constexpr (std::is_integral_v<T>) {
+            *j->to_int_() = (int64_t)v;
+            j->type_ = value_t::integral;
+        } else if constexpr (std::is_floating_point_v<T>) {
+            *j->to_float_() = (double)v;
+            j->type_ = value_t::floating;
+        } else {
+            static_assert([] { return false; }(), "type error");
+        }
+    }
+
+    template <typename T>
+    T to_number() const
     {
         auto* s = to_str_();
         T v{};
@@ -790,6 +789,16 @@ class json
             throw_invalid(__func__, "invalid numeric: " + *s);
         }
         return v;
+    }
+
+    static std::string to_string(double v)
+    {
+        char buf[64] = {0};
+        auto [_, ec] = std::to_chars(buf, buf + sizeof(buf), v);
+        if (ec != std::errc{}) {
+            throw_invalid(__func__, "invalid numeric: " + std::to_string(v));
+        }
+        return buf;
     }
 
     /************************************************************************
@@ -912,6 +921,25 @@ class json
         return u;
     }
 
+    static char unescape_(char c)
+    {
+        switch (c) {
+        // clang-format off
+        case 'b' : return '\b';
+        case 't' : return '\t';
+        case 'n' : return '\n';
+        case 'f' : return '\f';
+        case 'r' : return '\r';
+        case '"' : return '"';
+        case '/' : return '/';
+        case '\\': return '\\';
+        case 'u' : return 'u';
+        case '\0': throw_invalid(__func__, "unexpected eof");
+        default  : throw_invalid(__func__, "invalid escape sequence: (`" + std::string(1, c) + "')");
+            // clang-format on
+        }
+    }
+
     /**
      * 0000h - 007Fh : 1B
      * 0080h - 07FFh : 2B
@@ -972,27 +1000,6 @@ class json
         return cp;
     }
 
-    static char unescape_(char c)
-    {
-        // XXX invalid/unknown escape sequence?
-        switch (c) {
-        case 'b':
-            return '\b';
-        case 'f':
-            return '\f';
-        case 'n':
-            return '\n';
-        case 'r':
-            return '\r';
-        case 't':
-            return '\t';
-        case '\0':
-            throw_invalid(__func__, "unexpected eof");
-        default:
-            return c;
-        }
-    }
-
     /************************************************************************
      * parser
      */
@@ -1037,7 +1044,7 @@ class json
             : base_(s.data())
             , p_(base_)
         {
-            ltrim();
+            skip_ws();
         }
 
         size_t offset() const
@@ -1091,7 +1098,7 @@ class json
         {
             auto _ = s_.push(__func__);
             assert(*p_ == '{');
-            ltrim(1);
+            skip_ws(1);
             json j(value_t::object);
             auto* obj = j.to_obj_();
             bool comma = false;
@@ -1104,11 +1111,11 @@ class json
                 if (*p_++ != ':') {
                     throw_parser("key-value not separated with colon", -1);
                 }
-                ltrim();
+                skip_ws();
                 auto v = parse_value();
                 obj->emplace(std::move(*k.to_str_()), std::move(v));
 
-                ltrim((comma = *p_ == ',') ? 1 : 0);
+                skip_ws((comma = *p_ == ',') ? 1 : 0);
                 if (!comma) {
                     break;
                 }
@@ -1119,7 +1126,7 @@ class json
             if (*p_ != '}') {
                 throw_parser("object not end with right-brace");
             }
-            ltrim(1);
+            skip_ws(1);
             return j;
         }
 
@@ -1127,14 +1134,14 @@ class json
         {
             auto _ = s_.push(__func__);
             assert(*p_ == '[');
-            ltrim(1);
+            skip_ws(1);
             json j(value_t::array);
             auto* arr = j.to_arr_();
             bool comma = false;
             while (*p_ != ']') {
                 auto v = parse_value();
                 arr->emplace_back(std::move(v));
-                ltrim((comma = *p_ == ',') ? 1 : 0);
+                skip_ws((comma = *p_ == ',') ? 1 : 0);
                 if (!comma) {
                     break;
                 }
@@ -1145,7 +1152,7 @@ class json
             if (*p_ != ']') {
                 throw_parser("array not end with right-bracket");
             }
-            ltrim(1);
+            skip_ws(1);
             return j;
         }
 
@@ -1182,7 +1189,7 @@ class json
                 while (pass[((unsigned char)(c = *p_++))])
                     ;
                 if ((unsigned char)c <= 0x1f || (unsigned char)c == 0x7f) {
-                    throw_parser("invalid character");
+                    throw_parser("invalid character", -1);
                 }
                 if (c == '"') {
                     if (is_key && p_ > q + 1) {
@@ -1202,16 +1209,18 @@ class json
                             (void)decode_cp(p_);
                         }
                         continue;
+                    } else {
+                        c = json::unescape_(c);
                     }
                     if (is_key) {
-                        s.push_back(json::unescape_(c));
+                        s.push_back(c);
                     }
                 }
             }
             if (!is_key) {
                 s.assign(base, p_ - base - 1);
             }
-            ltrim();
+            skip_ws();
             return json(value_t::string, std::move(s));
         }
 
@@ -1241,7 +1250,7 @@ class json
             }
             auto type =
                 (len2 >= 0 || len3 > 0) ? value_t::floating_uncached : value_t::integral_uncached;
-            ltrim();
+            skip_ws();
             return json(type, std::move(s));
         }
 
@@ -1249,21 +1258,21 @@ class json
         {
             auto _ = s_.push(__func__);
             if (std::strncmp(p_, "true", 4) == 0) {
-                ltrim(4);
+                skip_ws(4);
                 return json(value_t::boolean, true);
             }
             if (std::strncmp(p_, "false", 5) == 0) {
-                ltrim(5);
+                skip_ws(5);
                 return json(value_t::boolean, false);
             }
             if (std::strncmp(p_, "null", 4) == 0) {
-                ltrim(4);
+                skip_ws(4);
                 return json{};
             }
             throw_parser("unexpected literal");
         }
 
-        void ltrim(ptrdiff_t offset = 0) noexcept
+        void skip_ws(ptrdiff_t offset = 0) noexcept
         {
             p_ += offset + std::strspn(p_ + offset, " \t\r\n");
         }
@@ -1344,12 +1353,12 @@ struct json::object_iterator
     }
 };
 
-json::object_iterator json::object_view::begin()
+inline json::object_iterator json::object_view::begin()
 {
     return json::object_iterator(obj->begin());
 }
 
-json::object_iterator json::object_view::end()
+inline json::object_iterator json::object_view::end()
 {
     return json::object_iterator(obj->end());
 }
