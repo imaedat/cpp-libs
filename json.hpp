@@ -664,54 +664,20 @@ class json
     }
 
     // --- array iterator ---
-    struct array_iterator
-    {
-        array_type::iterator it;
-        explicit array_iterator(array_type::iterator i)
-            : it(i)
-        {
-        }
-        json& operator*() const
-        {
-            return *it;
-        }
-        json* operator->() const
-        {
-            return &*it;
-        }
-        array_iterator& operator++()
-        {
-            ++it;
-            return *this;
-        }
-        array_iterator operator++(int)
-        {
-            auto v = *this;
-            ++(*this);
-            return v;
-        }
-        bool operator==(const array_iterator& rhs) const
-        {
-            return it == rhs.it;
-        }
-        bool operator!=(const array_iterator& rhs) const
-        {
-            return !(*this == rhs);
-        }
-    };
-
-    array_iterator begin()
+    using iterator = array_type::iterator;
+    // XXX using const_iterator = array_type::const_iterator;
+    array_type::iterator begin()
     {
         if (auto* arr = to_arr_()) {
-            return array_iterator(arr->begin());
+            return arr->begin();
         }
         throw_invalid(__func__, "not array");
     }
 
-    array_iterator end()
+    array_type::iterator end()
     {
         if (auto* arr = to_arr_()) {
-            return array_iterator(arr->end());
+            return arr->end();
         }
         throw_invalid(__func__, "not array");
     }
@@ -1319,6 +1285,12 @@ struct json::object_iterator
         }
     };
 
+    using iterator_category = std::input_iterator_tag;
+    using value_type = tbd::json::object_iterator::value_proxy;
+    using difference_type = std::ptrdiff_t;
+    using pointer = tbd::json::object_iterator::arrow_proxy;
+    using reference = tbd::json::object_iterator::value_proxy;
+
     json::object_type::iterator it;
     explicit object_iterator(json::object_type::iterator i)
         : it(i)
@@ -1364,24 +1336,5 @@ inline json::object_iterator json::object_view::end()
 }
 
 }  // namespace tbd
-
-template <>
-struct std::iterator_traits<tbd::json::array_iterator>
-{
-    using iterator_category = std::forward_iterator_tag;
-    using value_type = tbd::json;
-    using difference_type = std::ptrdiff_t;
-    using pointer = tbd::json*;
-    using reference = tbd::json&;
-};
-template <>
-struct std::iterator_traits<tbd::json::object_iterator>
-{
-    using iterator_category = std::input_iterator_tag;
-    using value_type = tbd::json::object_iterator::value_proxy;
-    using difference_type = std::ptrdiff_t;
-    using pointer = tbd::json::object_iterator::arrow_proxy;
-    using reference = tbd::json::object_iterator::value_proxy;
-};
 
 #endif
