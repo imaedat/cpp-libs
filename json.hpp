@@ -11,6 +11,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <new>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -62,14 +63,15 @@ class json
         null,
         boolean,
         integral,
-        integral_uncached,
         floating,
-        floating_uncached,
         string,
-        string_uncached,
-        unescaped_string,
         object,
         array,
+        //
+        integral_uncached,
+        floating_uncached,
+        string_uncached,
+        unescaped_string,
     } type_{value_t::null};
 
     /************************************************************************
@@ -168,7 +170,7 @@ class json
               std::enable_if_t<(std::is_same_v<std::decay_t<V>, bool> ||
                                 std::is_arithmetic_v<std::decay_t<V>> || string_like<V> ||
                                 std::is_same_v<std::decay_t<V>, json>),
-                               bool> = true>
+                               int> = 0>
     explicit json(V&& v)
     {
         union number n;
@@ -198,9 +200,12 @@ class json
             // clang-format off
             void operator()(std::monostate) { obj->emplace(k, json(value_t::null)); }
             void operator()(bool v) { obj->emplace(k, json(value_t::boolean, v)); }
-            void operator()(int64_t v) { n.i = v; obj->emplace(k, json(value_t::integral, std::to_string(v), n)); }
-            void operator()(double v) { n.d = v; obj->emplace(k, json(value_t::floating, to_string(v), n)); }
-            void operator()(const std::string& v) { obj->emplace(k, json(value_t::unescaped_string, v)); }
+            void operator()(int64_t v) {
+                n.i = v; obj->emplace(k, json(value_t::integral, std::to_string(v), n)); }
+            void operator()(double v) {
+                n.d = v; obj->emplace(k, json(value_t::floating, to_string(v), n)); }
+            void operator()(const std::string& v) {
+                obj->emplace(k, json(value_t::unescaped_string, v)); }
             void operator()(const json& v) { obj->emplace(k, v); }
             // clang-format on
         };
@@ -221,9 +226,12 @@ class json
             // clang-format off
             void operator()(std::monostate) { arr->emplace_back(json(value_t::null)); }
             void operator()(bool v) { arr->emplace_back(json(value_t::boolean, v)); }
-            void operator()(int64_t v) { n.i = v; arr->emplace_back(json(value_t::integral, std::to_string(v), n)); }
-            void operator()(double v) { n.d = v; arr->emplace_back(json(value_t::floating, to_string(v), n)); }
-            void operator()(const std::string& v) { arr->emplace_back(json(value_t::unescaped_string, v)); }
+            void operator()(int64_t v) {
+                n.i = v; arr->emplace_back(json(value_t::integral, std::to_string(v), n)); }
+            void operator()(double v) {
+                n.d = v; arr->emplace_back(json(value_t::floating, to_string(v), n)); }
+            void operator()(const std::string& v) {
+                arr->emplace_back(json(value_t::unescaped_string, v)); }
             void operator()(const json& v) { arr->emplace_back(v); }
             // clang-format on
         };
@@ -375,9 +383,9 @@ class json
     bool is_bool() const { return type_ == value_t::boolean; }
     bool is_integer() const { return type_ == value_t::integral ||
                                      type_ == value_t::integral_uncached; }
-    bool is_floating() const { return type_ == value_t::floating ||
-                                      type_ == value_t::floating_uncached; }
-    bool is_number() const { return is_integer() || is_floating(); }
+    bool is_float() const { return type_ == value_t::floating ||
+                                   type_ == value_t::floating_uncached; }
+    bool is_number() const { return is_integer() || is_float(); }
     bool is_string() const { return type_ == value_t::string ||
                                     type_ == value_t::string_uncached; }
     bool is_primitive() const { return is_null() || is_bool() || is_number() || is_string(); }
@@ -425,7 +433,7 @@ class json
     /************************************************************************
      * common operator
      */
-    template <typename V, std::enable_if_t<!std::is_same_v<std::decay_t<V>, json>, bool> = true>
+    template <typename V, std::enable_if_t<!std::is_same_v<std::decay_t<V>, json>, int> = 0>
     json& operator=(V&& v)
     {
         json rhs(std::forward<V>(v));
@@ -445,7 +453,7 @@ class json
         case value_t::integral:
         case value_t::integral_uncached:
             return (rhs.is_integer() && get<int64_t>() == rhs.get<int64_t>()) ||
-                   (rhs.is_floating() && get<double>() == rhs.get<double>());
+                   (rhs.is_float() && get<double>() == rhs.get<double>());
 
         case value_t::floating:
         case value_t::floating_uncached:
@@ -505,10 +513,10 @@ class json
             static_assert([] { return false; }(), "invalid type");
         }
 
-        throw_invalid(__func__, "not primitive");
+        throw_invalid(__func__, "type error");
     }
 
-    template <typename T, std::enable_if_t<std::is_arithmetic_v<T>, bool> = true>
+    template <typename T, std::enable_if_t<std::is_arithmetic_v<T>, int> = 0>
     T get_or(T v)
     {
         if (is_null()) {
@@ -517,7 +525,7 @@ class json
         return get<T>();
     }
 
-    template <typename T, std::enable_if_t<string_like<T>, bool> = true>
+    template <typename T, std::enable_if_t<string_like<T>, int> = 0>
     std::string get_or(T&& v)
     {
         if (is_null()) {
@@ -678,7 +686,7 @@ class json
         throw_invalid(__func__, "not array");
     }
 
-    template <typename J, std::enable_if_t<std::is_same_v<std::decay_t<J>, json>, bool> = true>
+    template <typename J, std::enable_if_t<std::is_same_v<std::decay_t<J>, json>, int> = 0>
     void push_back(J&& j)
     {
         if (is_null()) {
@@ -691,7 +699,7 @@ class json
         throw_invalid(__func__, "not array");
     }
 
-    template <typename V, std::enable_if_t<!std::is_same_v<std::decay_t<V>, json>, bool> = true>
+    template <typename V, std::enable_if_t<!std::is_same_v<std::decay_t<V>, json>, int> = 0>
     void push_back(V&& v)
     {
         push_back(json(std::forward<V>(v)));
@@ -736,7 +744,7 @@ class json
           void* cache_buffer_()       { return std::launder(buffer_ + cache_offset); }
     const void* cache_buffer_() const { return std::launder(buffer_ + cache_offset); }
 
-    bool holds_as_string() const { return is_integer() || is_floating() || is_string(); }
+    bool holds_as_string() const { return is_integer() || is_float() || is_string(); }
 
           object_type* as_obj_()             { return cast_<object_type>(is_object()); }
     const object_type* as_obj_() const       { return cast_<object_type>(is_object()); }
@@ -748,19 +756,19 @@ class json
     const std::string* as_str_cache_() const { return cast_<std::string>(is_string(), true); }
           int64_t*     as_int_()             { return cast_<int64_t>(is_integer(), true); }
     const int64_t*     as_int_() const       { return cast_<int64_t>(is_integer(), true); }
-          double*      as_float_()           { return cast_<double>(is_floating(), true); }
-    const double*      as_float_() const     { return cast_<double>(is_floating(), true); }
+          double*      as_float_()           { return cast_<double>(is_float(), true); }
+    const double*      as_float_() const     { return cast_<double>(is_float(), true); }
           bool*        as_bool_()            { return cast_<bool>(is_bool()); }
     const bool*        as_bool_() const      { return cast_<bool>(is_bool()); }
     // clang-format on
 
-    template <typename J, std::enable_if_t<std::is_same_v<std::decay_t<J>, json>, bool> = true>
+    template <typename J, std::enable_if_t<std::is_same_v<std::decay_t<J>, json>, int> = 0>
     void copy_number(J&& j)
     {
         if (j.type_ == value_t::integral) {
-            *(int64_t*)cache_buffer_() = *j.as_int_();
+            new (cache_buffer_()) int64_t(*j.as_int_());
         } else if (j.type_ == value_t::floating) {
-            *(double*)cache_buffer_() = *j.as_float_();
+            new (cache_buffer_()) double(*j.as_float_());
         }
     }
 
@@ -768,10 +776,10 @@ class json
     static void cache_number(json* j, T v)
     {
         if constexpr (std::is_integral_v<T>) {
-            *j->as_int_() = (int64_t)v;
+            new (j->cache_buffer_()) int64_t(v);
             j->type_ = value_t::integral;
         } else if constexpr (std::is_floating_point_v<T>) {
-            *j->as_float_() = (double)v;
+            new (j->cache_buffer_()) double(v);
             j->type_ = value_t::floating;
         } else {
             static_assert([] { return false; }(), "type error");
@@ -899,6 +907,8 @@ class json
                 ss.append("\\\\");
             } else if ((unsigned char)c <= 0x1f) {
                 ss.append(cntrl[(unsigned char)c]);
+            } else if ((unsigned char)c == 0x7f) {
+                ss.append("\\u007F");
             } else {
                 ss.push_back(c);
             }
@@ -1378,5 +1388,17 @@ inline json::object_iterator json::object_view::end()
 }
 
 }  // namespace tbd
+
+inline std::istream& operator>>(std::istream& is, tbd::json& j)
+{
+    std::istreambuf_iterator<char> begin(is), end;
+    j = tbd::json::parse(std::string(begin, end));
+    return is;
+}
+
+inline std::ostream& operator<<(std::ostream& os, const tbd::json& j)
+{
+    return (os << j.to_string());
+}
 
 #endif
