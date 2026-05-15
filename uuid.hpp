@@ -17,50 +17,111 @@ namespace tbd {
 
 class uuid
 {
+    inline static constexpr size_t UUID_LENGTH = 16;
     inline static constexpr unsigned NS_PER_MS = 1000 * 1000;
-    static constexpr std::tuple<bool, bool, uint8_t> validate(size_t i, char c)
-    {
-        if (i == 8 || i == 13 || i == 18 || i == 23) {
-            return {c == '-', true, 0};
-        }
-        if ('0' <= c && c <= '9') {
-            return {true, false, c - '0'};
-        }
-        if ('a' <= c && c <= 'f') {
-            return {true, false, c - 'a' + 10};
-        }
-        if ('A' <= c && c <= 'F') {
-            return {true, false, c - 'A' + 10};
-        }
-        return {false, false, 0};
-    }
 
-    std::array<uint8_t, 16> bytes_{};
+    std::array<uint8_t, UUID_LENGTH> bytes_{};
 
   public:
+    // static helper
+    class util
+    {
+        static constexpr std::tuple<bool, bool, uint8_t> validate(size_t i, char c)
+        {
+            if (i == 8 || i == 13 || i == 18 || i == 23) {
+                return {c == '-', true, 0};
+            }
+            if ('0' <= c && c <= '9') {
+                return {true, false, c - '0'};
+            }
+            if ('a' <= c && c <= 'f') {
+                return {true, false, c - 'a' + 10};
+            }
+            if ('A' <= c && c <= 'F') {
+                return {true, false, c - 'A' + 10};
+            }
+            return {false, false, 0};
+        }
+
+      public:
+        static void generate_v4(void* buf) noexcept
+        {
+            [[maybe_unused]] auto _ = ::getrandom(buf, UUID_LENGTH, 0);
+            auto* b = (uint8_t*)buf;
+            b[6] = (b[6] & 0x0fU) | 0x40U;
+            b[8] = (b[8] & 0x3fU) | 0x80U;
+        }
+
+        static void generate_v7(void* buf) noexcept
+        {
+            using namespace std::chrono;
+
+            auto now = duration_cast<nanoseconds>(system_clock::now().time_since_epoch());
+            uint64_t ts_rand = ((now.count() / NS_PER_MS) << 16) | (7U << 12);
+            uint16_t ns = (((now.count() % NS_PER_MS) << 12) + (NS_PER_MS / 2)) / NS_PER_MS;
+            ts_rand = ::htobe64(ts_rand | std::min(ns, (uint16_t)0x0fffU));
+            std::memcpy(buf, &ts_rand, 8);
+            auto* b = (uint8_t*)buf;
+            [[maybe_unused]] auto _ = ::getrandom(b + 8, 8, 0);
+            b[8] = (b[8] & 0x3fU) | 0x80U;
+        }
+
+        static void parse(std::string_view s, void* buf)
+        {
+            if (s.size() < 36 || (s.size() > 36 && s[36] != '\0')) {
+                throw std::invalid_argument("not uuid format");
+            }
+
+            auto* b = (uint8_t*)buf;
+            const char* p = s.data();
+            for (size_t i = 0; i < 36;) {
+                auto [hi_ok, hyphen, hi] = validate(i++, *p++);
+                if (!hi_ok) {
+                    throw std::invalid_argument("not uuid format");
+                }
+                if (hyphen) {
+                    continue;
+                }
+                auto [lo_ok, _, lo] = validate(i++, *p++);
+                if (!lo_ok) {
+                    throw std::invalid_argument("not uuid format");
+                }
+                *b++ = (hi << 4) | lo;
+            }
+        }
+
+        static std::string to_string(const void* buf)
+        {
+            static constexpr const char hex[] = "0123456789abcdef";
+
+            auto* bytes = (uint8_t*)buf;
+            std::string s(36, '\0');
+            auto* p = s.data();
+            for (size_t i = 0; i < UUID_LENGTH; ++i) {
+                *p++ = hex[bytes[i] >> 4];
+                *p++ = hex[bytes[i] & 0x0fU];
+                if (i == 3 || i == 5 || i == 7 || i == 9) {
+                    *p++ = '-';
+                }
+            }
+            return s;
+        }
+    };
+
+    // ctor & factory
     uuid() noexcept = default;
 
     static uuid v4() noexcept
     {
         uuid newid;
-        [[maybe_unused]] auto _ = ::getrandom(newid.bytes_.data(), newid.bytes_.size(), 0);
-        newid.bytes_[6] = (newid.bytes_[6] & 0x0fU) | 0x40U;
-        newid.bytes_[8] = (newid.bytes_[8] & 0x3fU) | 0x80U;
+        util::generate_v4(newid.bytes_.data());
         return newid;
     }
 
     static uuid v7() noexcept
     {
-        using namespace std::chrono;
-
         uuid newid;
-        uint64_t now = duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
-        uint64_t ts_rand = ((now / NS_PER_MS) << 16) | (7U << 12);
-        uint16_t ns = (((now % NS_PER_MS) << 12) + (NS_PER_MS / 2)) / NS_PER_MS;
-        ts_rand = ::htobe64(ts_rand | std::min(ns, (uint16_t)0x0fffU));
-        std::memcpy(newid.bytes_.data(), &ts_rand, 8);
-        [[maybe_unused]] auto _ = ::getrandom(newid.bytes_.data() + 8, 8, 0);
-        newid.bytes_[8] = (newid.bytes_[8] & 0x3fU) | 0x80U;
+        util::generate_v7(newid.bytes_.data());
         return newid;
     }
 
@@ -73,45 +134,14 @@ class uuid
 
     static uuid from_string(std::string_view s)
     {
-        if (s.size() < 36 || (s.size() > 36 && s[36] != '\0')) {
-            throw std::invalid_argument("not uuid format");
-        }
-
         uuid newid;
-        uint8_t* b = newid.bytes_.data();
-        const char* p = s.data();
-        for (size_t i = 0; i < 36;) {
-            auto [hi_ok, hyphen, hi] = validate(i++, *p++);
-            if (!hi_ok) {
-                throw std::invalid_argument("not uuid format");
-            }
-            if (hyphen) {
-                continue;
-            }
-            auto [lo_ok, _, lo] = validate(i++, *p++);
-            if (!lo_ok) {
-                throw std::invalid_argument("not uuid format");
-            }
-            *b++ = (hi << 4) | lo;
-        }
-
+        util::parse(s, newid.bytes_.data());
         return newid;
     }
 
     std::string to_string() const
     {
-        static constexpr const char hex[] = "0123456789abcdef";
-
-        std::string s(36, '\0');
-        auto* p = s.data();
-        for (size_t i = 0; i < size(); ++i) {
-            *p++ = hex[bytes_[i] >> 4];
-            *p++ = hex[bytes_[i] & 0x0fU];
-            if (i == 3 || i == 5 || i == 7 || i == 9) {
-                *p++ = '-';
-            }
-        }
-        return s;
+        return util::to_string(bytes_.data());
     }
 
     const uint8_t* data() const noexcept

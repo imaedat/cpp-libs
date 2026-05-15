@@ -22,7 +22,7 @@ using namespace tbd;
 // clang-format on
 
 DEFENV(V, 7);
-DEFENV(N, 10);
+DEFENV(N, 20);
 
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 string time2str(system_clock::time_point tp)
@@ -40,26 +40,35 @@ string time2str(system_clock::time_point tp)
 
 int main()
 {
-    uuid id0;
-    assert(id0.nil());
+    {
+        uuid id0;
+        assert(id0.nil());
 
-    auto id1 = uuid::v7();
-    ::usleep(1);
-    auto id2 = uuid::v7();
-    assert(id1 < id2);
-    DUMP(id1);
-    DUMP(id2);
+        auto id1 = uuid::v7();
+        ::usleep(1);
+        auto id2 = uuid::v7();
+        assert(id1 < id2);
+        DUMP(id1);
+        DUMP(id2);
 
-    auto id3 = uuid::from_string(id1.to_string());
-    assert(id3 == id1);
-    DUMP(id3);
+        auto id3 = uuid::from_string(id1.to_string());
+        assert(id3 == id1);
+        DUMP(id3);
 
-    uint8_t buf[16] = {0};
-    id1.write_to(buf);
-    auto id4 = uuid::from_bytes(buf);
-    assert(id4 == id3);
-    DUMP(id4);
-    cout << "\n";
+        uint8_t buf[16] = {0};
+        id1.write_to(buf);
+        auto id4 = uuid::from_bytes(buf);
+        assert(id4 == id3);
+        DUMP(id4);
+        cout << "\n";
+
+        // static helper
+        uuid::util::generate_v7(buf);
+        auto s = uuid::util::to_string(buf);
+        uint8_t buf2[16] = {0};
+        uuid::util::parse(s, buf2);
+        assert(memcmp(buf, buf2, 16) == 0);
+    }
 
     GETENV(V);
     GETENV(N);
